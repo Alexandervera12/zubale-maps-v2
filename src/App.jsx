@@ -132,7 +132,7 @@ export default function App() {
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Buscar por ID o dirección..."
+            placeholder="Buscar por SG"
             style={{ width: "100%", background: inputBg, border: `1px solid ${inputBorder}`, color: textPrimary, fontSize: 13, padding: "8px 12px", borderRadius: 8, outline: "none", boxSizing: "border-box" }}
           />
         </div>
