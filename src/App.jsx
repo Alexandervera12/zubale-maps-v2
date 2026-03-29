@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { GoogleMap, useJsApiLoader, Marker, InfoWindow, Polygon, Polyline } from "@react-google-maps/api";
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "firebase/firestore";
@@ -49,6 +49,12 @@ function makeExcludedPin() {
     scaledSize:{width:22,height:30},anchor:{x:11,y:30},
   };
 }
+function makePendingPin() {
+  return {
+    url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="#94a3b8" opacity="0.7"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.8"/><text x="11" y="15" text-anchor="middle" font-size="10" font-weight="700" fill="#94a3b8" font-family="sans-serif">?</text></svg>`)}`,
+    scaledSize:{width:22,height:30},anchor:{x:11,y:30},
+  };
+}
 
 const MAP_CENTER={lat:-33.47,lng:-70.64};
 const MAP_STYLE_DARK=[
@@ -73,111 +79,89 @@ function distKm(a,b) {
   return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
 }
 
-// ── Algoritmo mejorado: clustering por densidad + encadenamiento ──
-// PASO 1: Agrupa todos los puntos por proximidad (sin importar batchSize)
-// PASO 2: Dentro de cada cluster forma rutas de batchSize por encadenamiento
-// Así los puntos cercanos SIEMPRE quedan en el mismo cluster
-function clusterPoints(orders, maxDistKm) {
-  const n = orders.length;
-  const visited = new Array(n).fill(false);
-  const clusters = [];
+// ── Clustering por densidad ───────────────────────────────────────
+// Agrupa puntos donde CADA par de puntos adyacentes está dentro de maxDistKm
+// Usa distancia entre puntos del cluster y el candidato (no centroide)
+function clusterByDensity(orders, maxDistKm) {
+  const n=orders.length;
+  const assigned=new Array(n).fill(-1);
+  const clusters=[];
 
-  for (let i = 0; i < n; i++) {
-    if (visited[i]) continue;
-    // Nuevo cluster empezando desde el punto i
-    const cluster = [i];
-    visited[i] = true;
-    // Expandir: agregar todos los puntos cercanos a cualquier punto del cluster
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (let j = 0; j < n; j++) {
-        if (visited[j]) continue;
-        // Ver si está cerca de ALGÚN punto del cluster actual
-        const nearCluster = cluster.some(ci => distKm(orders[ci], orders[j]) <= maxDistKm);
-        if (nearCluster) {
-          cluster.push(j);
-          visited[j] = true;
-          changed = true;
+  for(let i=0;i<n;i++) {
+    if(assigned[i]!==-1) continue;
+    const clusterIdx=clusters.length;
+    clusters.push([i]);
+    assigned[i]=clusterIdx;
+
+    // BFS para expandir el cluster
+    const queue=[i];
+    while(queue.length>0) {
+      const curr=queue.shift();
+      for(let j=0;j<n;j++) {
+        if(assigned[j]!==-1) continue;
+        // Distancia directa entre el punto actual y el candidato
+        if(distKm(orders[curr],orders[j])<=maxDistKm) {
+          clusters[clusterIdx].push(j);
+          assigned[j]=clusterIdx;
+          queue.push(j);
         }
       }
     }
-    clusters.push(cluster.map(idx => orders[idx]));
   }
-  return clusters;
+  return clusters.map(idxs=>idxs.map(i=>orders[i]));
 }
 
-// Encadenar N puntos del pool más compactos empezando desde seed
-function chainRoute(seed, pool, batchSize, maxDistKm) {
-  const route = [seed];
-  const remaining = [...pool];
-  while (route.length < batchSize && remaining.length > 0) {
-    const last = route[route.length - 1];
-    let bestIdx = -1, bestDist = Infinity;
-    remaining.forEach((o, i) => {
-      const d = distKm(last, o);
-      if (d < bestDist && d <= maxDistKm * 1.5) { bestDist = d; bestIdx = i; }
-    });
-    if (bestIdx === -1) {
-      // No hay puntos cercanos — tomar el más cercano sin restricción
-      remaining.forEach((o, i) => {
-        const d = distKm(last, o);
-        if (d < bestDist) { bestDist = d; bestIdx = i; }
-      });
-    }
-    route.push(remaining.splice(bestIdx, 1)[0]);
-  }
-  return { route, remaining };
-}
-
+// ── Algoritmo principal ───────────────────────────────────────────
+// - Agrupa por densidad
+// - Dentro de cada cluster forma rutas completas de exactamente batchSize
+// - Los puntos que NO completan un batch → sinAsignar (NO se marcan como ruteados)
 function generateRoutes(orders, batchSize, maxDistKm) {
-  if (orders.length === 0) return [];
+  if(orders.length===0) return {routes:[],sinAsignar:[]};
 
-  // Paso 1: agrupar por densidad
-  const clusters = clusterPoints(orders, maxDistKm);
+  const clusters=clusterByDensity(orders,maxDistKm);
+  const routes=[];
+  const sinAsignar=[];
+  let colorIdx=0;
 
-  const routes = [];
-  let colorIdx = 0;
+  clusters.forEach(cluster=>{
+    const pool=[...cluster];
 
-  // Paso 2: dentro de cada cluster, formar rutas por encadenamiento
-  clusters.forEach(cluster => {
-    const pool = [...cluster];
-    while (pool.length > 0) {
-      const seed = pool.shift();
-      if (pool.length === 0) {
-        // Solo queda un punto — ruta incompleta
-        routes.push({
-          id: `R${routes.length+1}`, label: `Ruta ${routes.length+1}`,
-          color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
-          orders: [seed], hidden: false,
-          routeNum: routes.length+1, incomplete: true,
+    // Ordenar pool por cercanía entre sí para mejor encadenamiento inicial
+    // Empezar desde el punto más al norte (lat mayor)
+    pool.sort((a,b)=>b.lat-a.lat);
+
+    while(pool.length>=batchSize) {
+      // Tomar el primer punto como semilla
+      const seed=pool.shift();
+      const route=[seed];
+
+      // Encadenar: siempre el más cercano al último punto añadido
+      while(route.length<batchSize&&pool.length>0) {
+        const last=route[route.length-1];
+        let bestIdx=0,bestDist=Infinity;
+        pool.forEach((o,i)=>{
+          const d=distKm(last,o);
+          if(d<bestDist){bestDist=d;bestIdx=i;}
         });
-        colorIdx++;
-        break;
+        route.push(pool.splice(bestIdx,1)[0]);
       }
 
-      // Formar ruta de batchSize
-      const { route, remaining: leftover } = chainRoute(seed, pool, batchSize - 1, maxDistKm);
-
-      // Devolver al pool los que no entraron
-      pool.length = 0;
-      leftover.forEach(o => pool.push(o));
-      // Reordenar pool: primero los más cercanos al último punto de la ruta
-      const lastPoint = route[route.length - 1];
-      pool.sort((a, b) => distKm(a, lastPoint) - distKm(b, lastPoint));
-
       routes.push({
-        id: `R${routes.length+1}`, label: `Ruta ${routes.length+1}`,
-        color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
-        orders: route, hidden: false,
-        routeNum: routes.length+1,
-        incomplete: route.length < batchSize,
+        id:`R${routes.length+1}`,
+        label:`Ruta ${routes.length+1}`,
+        color:ROUTE_COLORS[colorIdx%ROUTE_COLORS.length],
+        orders:route,
+        hidden:false,
+        routeNum:routes.length+1,
       });
       colorIdx++;
     }
+
+    // Sobrantes del cluster — NO forman ruta, quedan pendientes
+    pool.forEach(o=>sinAsignar.push(o));
   });
 
-  return routes;
+  return {routes,sinAsignar};
 }
 
 function convexHull(points) {
@@ -193,7 +177,10 @@ function expandHull(points) {
   if(points.length<2) return points;
   const cLat=points.reduce((s,p)=>s+p.lat,0)/points.length;
   const cLng=points.reduce((s,p)=>s+p.lng,0)/points.length;
-  return points.map(p=>({lat:cLat+(p.lat-cLat)*1.3+(p.lat>cLat?0.0008:-0.0008),lng:cLng+(p.lng-cLng)*1.3+(p.lng>cLng?0.0008:-0.0008)}));
+  return points.map(p=>({
+    lat:cLat+(p.lat-cLat)*1.3+(p.lat>cLat?0.0008:-0.0008),
+    lng:cLng+(p.lng-cLng)*1.3+(p.lng>cLng?0.0008:-0.0008),
+  }));
 }
 function pointInPolygon(point,polygon) {
   let inside=false;
@@ -234,6 +221,7 @@ export default function App() {
   const [routes,setRoutes]                 = useState([]);
   const [activeRoute,setActiveRoute]       = useState(null);
   const [sinAsignar,setSinAsignar]         = useState([]);
+  const [excludedOrders,setExcludedOrders] = useState([]);
   const [zones,setZones]               = useState([]);
   const [drawing,setDrawing]           = useState(false);
   const [currentPoints,setCurrentPoints] = useState([]);
@@ -247,15 +235,15 @@ export default function App() {
 
   const zKeyRef=useRef(0);
   useEffect(()=>{
-    const handler=(e)=>{
+    const h=(e)=>{
       if(e.key==="z"||e.key==="Z"){
         const now=Date.now();
         if(now-zKeyRef.current<600) setMode("zonas");
         zKeyRef.current=now;
       }
     };
-    window.addEventListener("keydown",handler);
-    return()=>window.removeEventListener("keydown",handler);
+    window.addEventListener("keydown",h);
+    return()=>window.removeEventListener("keydown",h);
   },[]);
 
   const mapRef=useRef(null);
@@ -278,22 +266,22 @@ export default function App() {
 
   useEffect(()=>{fetchSheets();const iv=setInterval(fetchSheets,60000);return()=>clearInterval(iv);},[fetchSheets]);
   useEffect(()=>{
-    const colRef=collection(db,"taken",getTodayKey(),"orders");
-    return onSnapshot(colRef,snap=>{const ids=new Set();snap.forEach(d=>ids.add(d.id));setTakenIds(ids);});
+    const c=collection(db,"taken",getTodayKey(),"orders");
+    return onSnapshot(c,s=>{const ids=new Set();s.forEach(d=>ids.add(d.id));setTakenIds(ids);});
   },[]);
   useEffect(()=>{
-    const colRef=collection(db,"routed",getRoutedKey(),"orders");
-    return onSnapshot(colRef,snap=>{const ids=new Set();snap.forEach(d=>ids.add(d.id));setRoutedIds(ids);});
+    const c=collection(db,"routed",getRoutedKey(),"orders");
+    return onSnapshot(c,s=>{const ids=new Set();s.forEach(d=>ids.add(d.id));setRoutedIds(ids);});
   },[]);
   useEffect(()=>{
-    const colRef=collection(db,"exclusion_zones");
-    return onSnapshot(colRef,snap=>{const zs=[];snap.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
+    const c=collection(db,"exclusion_zones");
+    return onSnapshot(c,s=>{const zs=[];s.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
   },[]);
 
   async function toggleTaken(id){
-    const docRef=doc(db,"taken",getTodayKey(),"orders",id);
-    if(takenIds.has(id))await deleteDoc(docRef);
-    else await setDoc(docRef,{takenAt:new Date().toISOString()});
+    const r=doc(db,"taken",getTodayKey(),"orders",id);
+    if(takenIds.has(id))await deleteDoc(r);
+    else await setDoc(r,{takenAt:new Date().toISOString()});
     setSelected(null);
   }
   async function markAsRouted(orders){
@@ -306,18 +294,24 @@ export default function App() {
   function handleGenerate(includeAll=false){
     if(!selectedWindow)return;
     const windowOrders=data.filter(d=>d.window===selectedWindow);
+    const excl=windowOrders.filter(o=>isExcluded(o,zones));
     const nonExcluded=windowOrders.filter(o=>!isExcluded(o,zones));
-    const excluded=windowOrders.filter(o=>isExcluded(o,zones));
     const toRoute=includeAll?nonExcluded:nonExcluded.filter(o=>!routedIds.has(o.id));
-    const r=generateRoutes(toRoute,batchSize,maxDistKm);
-    const allOrders=r.flatMap(rt=>rt.orders);
-    if(allOrders.length>0) markAsRouted(allOrders);
-    const asignados=new Set(allOrders.map(o=>o.id));
-    const noAsignados=toRoute.filter(o=>!asignados.has(o.id));
-    setSinAsignar([...noAsignados,...excluded.map(o=>({...o,excluded:true}))]);
+
+    const {routes:r,sinAsignar:sa}=generateRoutes(toRoute,batchSize,maxDistKm);
+
+    // Solo marcar como ruteados los que SÍ tienen ruta completa
+    const ruteados=r.flatMap(rt=>rt.orders);
+    if(ruteados.length>0) markAsRouted(ruteados);
+
     setRoutes(r);
+    setSinAsignar(sa); // sin ruta por no completar batch — NO marcados
+    setExcludedOrders(excl);
     setActiveRoute(null);
-    if(mapRef.current&&toRoute.length>0){mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});mapRef.current.setZoom(12);}
+    if(mapRef.current&&toRoute.length>0){
+      mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});
+      mapRef.current.setZoom(12);
+    }
   }
 
   function toggleHideRoute(id){setRoutes(prev=>prev.map(r=>r.id===id?{...r,hidden:!r.hidden}:r));}
@@ -447,13 +441,12 @@ export default function App() {
               <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
                 {VENTANAS.filter(v=>windowCounts[v]>0).map(v=>(
-                  <button key={v} onClick={()=>{setSelectedWindow(v);setRoutes([]);setActiveRoute(null);setSinAsignar([]);}} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer"}}>
+                  <button key={v} onClick={()=>{setSelectedWindow(v);setRoutes([]);setActiveRoute(null);setSinAsignar([]);setExcludedOrders([]);}} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer"}}>
                     {v} <span style={{opacity:0.75,fontSize:10}}>({windowCounts[v]})</span>
                   </button>
                 ))}
               </div>
             </div>
-
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 2 — Pedidos por ruta</p>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
@@ -463,23 +456,16 @@ export default function App() {
                 <span style={{fontSize:12,color:textMut}}>pedidos por ruta</span>
               </div>
             </div>
-
-            {/* Slider distancia máxima */}
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-                <p style={{fontSize:11,color:textMut,textTransform:"uppercase",letterSpacing:"0.06em"}}>Distancia máxima entre puntos</p>
+                <p style={{fontSize:11,color:textMut,textTransform:"uppercase",letterSpacing:"0.06em"}}>Distancia máx. entre puntos</p>
                 <span style={{fontSize:13,fontWeight:600,color:textPri}}>{maxDistKm} km</span>
               </div>
-              <input type="range" min="1" max="5" step="0.5" value={maxDistKm}
-                onChange={e=>setMaxDistKm(parseFloat(e.target.value))}
-                style={{width:"100%"}}/>
+              <input type="range" min="1" max="5" step="0.5" value={maxDistKm} onChange={e=>setMaxDistKm(parseFloat(e.target.value))} style={{width:"100%"}}/>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:textMut,marginTop:3}}>
-                <span>1 km</span>
-                <span>3 km</span>
-                <span>5 km</span>
+                <span>1 km</span><span>3 km</span><span>5 km</span>
               </div>
             </div>
-
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`,display:"flex",flexDirection:"column",gap:6}}>
               {selectedWindow&&(
                 <div style={{fontSize:11,color:textMut,marginBottom:2}}>
@@ -494,7 +480,6 @@ export default function App() {
                 Reordenar todo (incluye ya ruteados)
               </button>
             </div>
-
             <div style={{flex:1,overflowY:"auto",padding:8}}>
               {routes.length===0?(
                 <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px",lineHeight:1.6}}>Selecciona una ventana y genera las rutas</div>
@@ -502,7 +487,8 @@ export default function App() {
                 <>
                   <div style={{padding:"4px 8px 8px",fontSize:11,color:textMut}}>
                     {routes.length} rutas · {routes.reduce((s,r)=>s+r.orders.length,0)} asignados
-                    {sinAsignar.length>0&&<span style={{color:"#f59e0b",marginLeft:6}}>· {sinAsignar.length} excluidos</span>}
+                    {sinAsignar.length>0&&<span style={{color:"#94a3b8",marginLeft:6}}>· {sinAsignar.length} pendientes</span>}
+                    {excludedOrders.length>0&&<span style={{color:"#f59e0b",marginLeft:6}}>· {excludedOrders.length} excluidos</span>}
                   </div>
                   {routes.map(r=>(
                     <div key={r.id} style={{borderRadius:8,border:`1.5px solid ${activeRoute===r.id?r.color:border}`,marginBottom:5,overflow:"hidden",background:r.hidden?(dark?"#0f1117":"#f8fafc"):(activeRoute===r.id?r.color+"10":"transparent"),opacity:r.hidden?0.5:1}}>
@@ -510,7 +496,7 @@ export default function App() {
                         <div onClick={()=>setActiveRoute(activeRoute===r.id?null:r.id)} style={{display:"flex",alignItems:"center",gap:7,flex:1,cursor:"pointer"}}>
                           <div style={{width:22,height:22,borderRadius:"50%",background:r.hidden?"#475569":r.color,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#fff"}}>{r.routeNum}</div>
                           <span style={{fontSize:12,fontWeight:600,color:r.hidden?textMut:textPri}}>{r.label}</span>
-                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:r.color+"25",color:r.color}}>{r.orders.length} stops{r.incomplete?" ⚠":""}</span>
+                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:r.color+"25",color:r.color}}>{r.orders.length} stops</span>
                         </div>
                         <div onClick={()=>toggleHideRoute(r.id)} style={{width:36,height:20,borderRadius:10,cursor:"pointer",position:"relative",flexShrink:0,transition:"background 0.2s",background:r.hidden?(dark?"#2a3044":"#cbd5e1"):r.color+"99"}}>
                           <div style={{width:14,height:14,borderRadius:"50%",background:"#fff",position:"absolute",top:3,transition:"left 0.2s",left:r.hidden?3:19}}/>
@@ -533,16 +519,31 @@ export default function App() {
                     </div>
                   ))}
                   {sinAsignar.length>0&&(
-                    <div style={{borderRadius:8,border:"1px solid #854f0b",marginTop:8,overflow:"hidden",background:dark?"#1c1206":"#fffbeb"}}>
+                    <div style={{borderRadius:8,border:`1px solid ${dark?"#2a3044":"#cbd5e1"}`,marginTop:8,overflow:"hidden",background:dark?"#151820":"#f8fafc"}}>
                       <div style={{padding:"8px 10px",display:"flex",alignItems:"center",gap:7}}>
-                        <div style={{width:9,height:9,borderRadius:"50%",background:"#f59e0b",flexShrink:0}}/>
-                        <span style={{fontSize:12,fontWeight:600,color:"#f59e0b",flex:1}}>Excluidos / Sin asignar</span>
-                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:"#f59e0b25",color:"#f59e0b"}}>{sinAsignar.length}</span>
+                        <div style={{width:9,height:9,borderRadius:"50%",background:"#94a3b8",flexShrink:0}}/>
+                        <span style={{fontSize:12,fontWeight:600,color:textMut,flex:1}}>Sin ruta (quedan disponibles)</span>
+                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:dark?"#1e2436":"#f1f5f9",color:textMut}}>{sinAsignar.length}</span>
                       </div>
                       <div style={{padding:"0 10px 8px"}}>
+                        <div style={{fontSize:11,color:textMut,marginBottom:4,lineHeight:1.4}}>No completaron el batch de {batchSize}. Se incluirán en la próxima generación.</div>
                         {sinAsignar.map(o=>(
+                          <div key={o.id} style={{fontSize:11,color:textMut,padding:"1px 0"}}>{o.id} — {o.address.split(",")[0]}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {excludedOrders.length>0&&(
+                    <div style={{borderRadius:8,border:"1px solid #854f0b",marginTop:6,overflow:"hidden",background:dark?"#1c1206":"#fffbeb"}}>
+                      <div style={{padding:"8px 10px",display:"flex",alignItems:"center",gap:7}}>
+                        <div style={{width:9,height:9,borderRadius:"50%",background:"#f59e0b",flexShrink:0}}/>
+                        <span style={{fontSize:12,fontWeight:600,color:"#f59e0b",flex:1}}>Zona excluida</span>
+                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:"#f59e0b25",color:"#f59e0b"}}>{excludedOrders.length}</span>
+                      </div>
+                      <div style={{padding:"0 10px 8px"}}>
+                        {excludedOrders.map(o=>(
                           <div key={o.id} style={{fontSize:11,color:textMut,padding:"1px 0",display:"flex",gap:5}}>
-                            {o.excluded&&<span style={{color:"#ef4444",fontSize:10}}>✕</span>}
+                            <span style={{color:"#ef4444",fontSize:10}}>✕</span>
                             <span>{o.id} — {o.address.split(",")[0]}</span>
                           </div>
                         ))}
@@ -567,7 +568,7 @@ export default function App() {
               ):(
                 <div>
                   <div style={{fontSize:12,color:"#f59e0b",marginBottom:8,padding:"8px",background:dark?"#1c1206":"#fffbeb",borderRadius:6,lineHeight:1.5}}>
-                    Haz clic en el mapa para marcar puntos. Mínimo 3.
+                    Clic en el mapa para marcar puntos. Mínimo 3.
                     <br/><strong style={{color:"#f1f5f9"}}>{currentPoints.length} puntos</strong> marcados
                   </div>
                   <div style={{display:"flex",gap:6}}>
@@ -603,7 +604,7 @@ export default function App() {
                 options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
 
                 {zones.map(z=>(
-                  <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.15,strokeColor:z.color,strokeOpacity:0.8,strokeWeight:2}}/>
+                  <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.6,strokeWeight:1.5}}/>
                 ))}
                 {drawing&&currentPoints.length>=2&&<Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>}
                 {drawing&&currentPoints.map((p,i)=>(
@@ -633,16 +634,20 @@ export default function App() {
                   const expanded=expandHull(hull);
                   const isActive=activeRoute===r.id;
                   return(
-                    <div key={r.id}>
-                      {expanded.length>=3&&<Polygon paths={expanded} options={{fillColor:r.color,fillOpacity:isActive?0.25:0.1,strokeColor:r.color,strokeOpacity:isActive?1:0.5,strokeWeight:isActive?2.5:1.5}} onClick={()=>setActiveRoute(activeRoute===r.id?null:r.id)}/>}
+                    <React.Fragment key={r.id}>
+                      {expanded.length>=3&&<Polygon paths={expanded} options={{fillColor:r.color,fillOpacity:isActive?0.25:0.12,strokeColor:r.color,strokeOpacity:isActive?1:0.6,strokeWeight:isActive?2.5:1.5}} onClick={()=>setActiveRoute(activeRoute===r.id?null:r.id)}/>}
                       {isActive&&<Polyline path={r.orders.map(o=>({lat:o.lat,lng:o.lng}))} options={{strokeColor:r.color,strokeOpacity:0.5,strokeWeight:2,geodesic:true}}/>}
                       {r.orders.map(o=>(
                         <Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeRoutePinSvg(r.color,r.routeNum,takenIds.has(o.id))} onClick={()=>setSelected(o)}/>
                       ))}
-                    </div>
+                    </React.Fragment>
                   );
                 })}
+
                 {mode==="ruteo"&&sinAsignar.map(o=>(
+                  <Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makePendingPin()} onClick={()=>setSelected(o)}/>
+                ))}
+                {mode==="ruteo"&&excludedOrders.map(o=>(
                   <Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeExcludedPin()} onClick={()=>setSelected(o)}/>
                 ))}
                 {mode==="ruteo"&&selected&&(
