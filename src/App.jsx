@@ -13,7 +13,6 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
-
 const ZONE_PASSWORD = "Alexander0097";
 
 const VENTANA_PALETTE = {
@@ -30,14 +29,14 @@ const ROUTE_COLORS = [
 const ZONE_COLORS = ["#ef4444","#f97316","#a855f7","#ec4899","#6366f1","#14b8a6"];
 
 function makeRoutePinSvg(hex, routeNum, taken=false) {
-  const c = taken?"#64748b":(hex||"#3b82f6");
+  const c=taken?"#64748b":(hex||"#3b82f6");
   return {
     url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36"><path d="M14 0C6.27 0 0 6.27 0 14C0 24.5 14 36 14 36S28 24.5 28 14C28 6.27 21.73 0 14 0Z" fill="${c}" opacity="${taken?0.4:1}"/><circle cx="14" cy="14" r="9" fill="white" opacity="0.95"/><text x="14" y="18" text-anchor="middle" font-size="11" font-weight="700" fill="${c}" font-family="sans-serif">${routeNum}</text></svg>`)}`,
     scaledSize:{width:28,height:36},anchor:{x:14,y:36},
   };
 }
 function makePinSvg(hex, taken=false) {
-  const c = taken?"#64748b":(hex||"#3b82f6");
+  const c=taken?"#64748b":(hex||"#3b82f6");
   return {
     url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="${c}" opacity="${taken?0.4:1}"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.9"/>${taken?`<line x1="7" y1="7" x2="15" y2="15" stroke="#64748b" stroke-width="2" stroke-linecap="round"/>`:""}
 </svg>`)}`,
@@ -74,78 +73,109 @@ function distKm(a,b) {
   return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
 }
 
-// ── Algoritmo encadenamiento ──────────────────────────────────────
-// Encuentra el grupo de N puntos más compacto empezando desde cada punto
-// Usa encadenamiento: el siguiente punto es el más cercano al ÚLTIMO punto añadido
-function generateRoutes(orders, batchSize) {
-  if(orders.length===0) return [];
-  const remaining=[...orders];
-  const routes=[];
-  let ci=0;
+// ── Algoritmo mejorado: clustering por densidad + encadenamiento ──
+// PASO 1: Agrupa todos los puntos por proximidad (sin importar batchSize)
+// PASO 2: Dentro de cada cluster forma rutas de batchSize por encadenamiento
+// Así los puntos cercanos SIEMPRE quedan en el mismo cluster
+function clusterPoints(orders, maxDistKm) {
+  const n = orders.length;
+  const visited = new Array(n).fill(false);
+  const clusters = [];
 
-  while(remaining.length>=batchSize) {
-    // Buscar el mejor grupo de batchSize puntos usando encadenamiento
-    let bestGroup=null, bestTotalDist=Infinity;
-
-    // Probar cada punto como semilla
-    for(let si=0;si<Math.min(remaining.length,20);si++) {
-      const group=[remaining[si]];
-      const available=remaining.filter((_,i)=>i!==si);
-      let totalDist=0;
-
-      // Encadenar: siguiente más cercano al último punto
-      while(group.length<batchSize&&available.length>0) {
-        const last=group[group.length-1];
-        let bi=-1,bd=Infinity;
-        available.forEach((o,i)=>{
-          const d=distKm(last,o);
-          if(d<bd){bd=d;bi=i;}
-        });
-        if(bi===-1) break;
-        totalDist+=bd;
-        group.push(available.splice(bi,1)[0]);
-      }
-
-      // Solo considerar grupos completos
-      if(group.length===batchSize&&totalDist<bestTotalDist) {
-        bestTotalDist=totalDist;
-        bestGroup=group;
+  for (let i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    // Nuevo cluster empezando desde el punto i
+    const cluster = [i];
+    visited[i] = true;
+    // Expandir: agregar todos los puntos cercanos a cualquier punto del cluster
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let j = 0; j < n; j++) {
+        if (visited[j]) continue;
+        // Ver si está cerca de ALGÚN punto del cluster actual
+        const nearCluster = cluster.some(ci => distKm(orders[ci], orders[j]) <= maxDistKm);
+        if (nearCluster) {
+          cluster.push(j);
+          visited[j] = true;
+          changed = true;
+        }
       }
     }
-
-    if(!bestGroup) break;
-
-    // Remover del pool los puntos usados
-    bestGroup.forEach(o=>{
-      const idx=remaining.findIndex(r=>r.id===o.id);
-      if(idx!==-1) remaining.splice(idx,1);
-    });
-
-    routes.push({
-      id:`R${routes.length+1}`,
-      label:`Ruta ${routes.length+1}`,
-      window:orders[0]?.window,
-      color:ROUTE_COLORS[ci%ROUTE_COLORS.length],
-      orders:bestGroup,
-      hidden:false,
-      routeNum:routes.length+1,
-    });
-    ci++;
+    clusters.push(cluster.map(idx => orders[idx]));
   }
+  return clusters;
+}
 
-  // Pedidos sobrantes (menos que batchSize) — forman ruta incompleta
-  if(remaining.length>0) {
-    routes.push({
-      id:`R${routes.length+1}`,
-      label:`Ruta ${routes.length+1}`,
-      window:orders[0]?.window,
-      color:ROUTE_COLORS[ci%ROUTE_COLORS.length],
-      orders:remaining,
-      hidden:false,
-      routeNum:routes.length+1,
-      incomplete:true,
+// Encadenar N puntos del pool más compactos empezando desde seed
+function chainRoute(seed, pool, batchSize, maxDistKm) {
+  const route = [seed];
+  const remaining = [...pool];
+  while (route.length < batchSize && remaining.length > 0) {
+    const last = route[route.length - 1];
+    let bestIdx = -1, bestDist = Infinity;
+    remaining.forEach((o, i) => {
+      const d = distKm(last, o);
+      if (d < bestDist && d <= maxDistKm * 1.5) { bestDist = d; bestIdx = i; }
     });
+    if (bestIdx === -1) {
+      // No hay puntos cercanos — tomar el más cercano sin restricción
+      remaining.forEach((o, i) => {
+        const d = distKm(last, o);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      });
+    }
+    route.push(remaining.splice(bestIdx, 1)[0]);
   }
+  return { route, remaining };
+}
+
+function generateRoutes(orders, batchSize, maxDistKm) {
+  if (orders.length === 0) return [];
+
+  // Paso 1: agrupar por densidad
+  const clusters = clusterPoints(orders, maxDistKm);
+
+  const routes = [];
+  let colorIdx = 0;
+
+  // Paso 2: dentro de cada cluster, formar rutas por encadenamiento
+  clusters.forEach(cluster => {
+    const pool = [...cluster];
+    while (pool.length > 0) {
+      const seed = pool.shift();
+      if (pool.length === 0) {
+        // Solo queda un punto — ruta incompleta
+        routes.push({
+          id: `R${routes.length+1}`, label: `Ruta ${routes.length+1}`,
+          color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
+          orders: [seed], hidden: false,
+          routeNum: routes.length+1, incomplete: true,
+        });
+        colorIdx++;
+        break;
+      }
+
+      // Formar ruta de batchSize
+      const { route, remaining: leftover } = chainRoute(seed, pool, batchSize - 1, maxDistKm);
+
+      // Devolver al pool los que no entraron
+      pool.length = 0;
+      leftover.forEach(o => pool.push(o));
+      // Reordenar pool: primero los más cercanos al último punto de la ruta
+      const lastPoint = route[route.length - 1];
+      pool.sort((a, b) => distKm(a, lastPoint) - distKm(b, lastPoint));
+
+      routes.push({
+        id: `R${routes.length+1}`, label: `Ruta ${routes.length+1}`,
+        color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
+        orders: route, hidden: false,
+        routeNum: routes.length+1,
+        incomplete: route.length < batchSize,
+      });
+      colorIdx++;
+    }
+  });
 
   return routes;
 }
@@ -197,14 +227,13 @@ export default function App() {
   const [darkMap,setDarkMap]     = useState(true);
   const [hideTaken,setHideTaken] = useState(false);
   const [takenIds,setTakenIds]   = useState(new Set());
-  const [routedIds,setRoutedIds] = useState(new Set()); // IDs ya ruteados hoy
-
+  const [routedIds,setRoutedIds] = useState(new Set());
   const [selectedWindow,setSelectedWindow] = useState(null);
   const [batchSize,setBatchSize]           = useState(3);
+  const [maxDistKm,setMaxDistKm]           = useState(3);
   const [routes,setRoutes]                 = useState([]);
   const [activeRoute,setActiveRoute]       = useState(null);
   const [sinAsignar,setSinAsignar]         = useState([]);
-
   const [zones,setZones]               = useState([]);
   const [drawing,setDrawing]           = useState(false);
   const [currentPoints,setCurrentPoints] = useState([]);
@@ -216,13 +245,12 @@ export default function App() {
   const [deletePassword,setDeletePassword] = useState("");
   const [deleteError,setDeleteError]   = useState("");
 
-  // Atajo secreto Z+Z para modo zonas
-  const zKeyRef = useRef(0);
+  const zKeyRef=useRef(0);
   useEffect(()=>{
     const handler=(e)=>{
       if(e.key==="z"||e.key==="Z"){
         const now=Date.now();
-        if(now-zKeyRef.current<600){setMode("zonas");}
+        if(now-zKeyRef.current<600) setMode("zonas");
         zKeyRef.current=now;
       }
     };
@@ -249,20 +277,14 @@ export default function App() {
   },[SHEETS_URL]);
 
   useEffect(()=>{fetchSheets();const iv=setInterval(fetchSheets,60000);return()=>clearInterval(iv);},[fetchSheets]);
-
-  // Firebase: tomados
   useEffect(()=>{
     const colRef=collection(db,"taken",getTodayKey(),"orders");
     return onSnapshot(colRef,snap=>{const ids=new Set();snap.forEach(d=>ids.add(d.id));setTakenIds(ids);});
   },[]);
-
-  // Firebase: ruteados del día
   useEffect(()=>{
     const colRef=collection(db,"routed",getRoutedKey(),"orders");
     return onSnapshot(colRef,snap=>{const ids=new Set();snap.forEach(d=>ids.add(d.id));setRoutedIds(ids);});
   },[]);
-
-  // Firebase: zonas
   useEffect(()=>{
     const colRef=collection(db,"exclusion_zones");
     return onSnapshot(colRef,snap=>{const zs=[];snap.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
@@ -274,8 +296,6 @@ export default function App() {
     else await setDoc(docRef,{takenAt:new Date().toISOString()});
     setSelected(null);
   }
-
-  // Marcar IDs como ruteados en Firebase
   async function markAsRouted(orders){
     const key=getRoutedKey();
     await Promise.all(orders.map(o=>setDoc(doc(db,"routed",key,"orders",o.id),{routedAt:new Date().toISOString()})));
@@ -283,33 +303,21 @@ export default function App() {
 
   useEffect(()=>{setSelected(null);setActiveRoute(null);},[mode]);
 
-  // GENERAR RUTAS — solo pedidos no ruteados hoy
   function handleGenerate(includeAll=false){
     if(!selectedWindow)return;
     const windowOrders=data.filter(d=>d.window===selectedWindow);
     const nonExcluded=windowOrders.filter(o=>!isExcluded(o,zones));
     const excluded=windowOrders.filter(o=>isExcluded(o,zones));
-
-    // Si no includeAll, filtrar los ya ruteados
-    const toRoute=includeAll
-      ?nonExcluded
-      :nonExcluded.filter(o=>!routedIds.has(o.id));
-
-    const r=generateRoutes(toRoute,batchSize);
-
-    // Marcar todos los ruteados en Firebase
+    const toRoute=includeAll?nonExcluded:nonExcluded.filter(o=>!routedIds.has(o.id));
+    const r=generateRoutes(toRoute,batchSize,maxDistKm);
     const allOrders=r.flatMap(rt=>rt.orders);
     if(allOrders.length>0) markAsRouted(allOrders);
-
     const asignados=new Set(allOrders.map(o=>o.id));
     const noAsignados=toRoute.filter(o=>!asignados.has(o.id));
     setSinAsignar([...noAsignados,...excluded.map(o=>({...o,excluded:true}))]);
     setRoutes(r);
     setActiveRoute(null);
-    if(mapRef.current&&toRoute.length>0){
-      mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});
-      mapRef.current.setZoom(12);
-    }
+    if(mapRef.current&&toRoute.length>0){mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});mapRef.current.setZoom(12);}
   }
 
   function toggleHideRoute(id){setRoutes(prev=>prev.map(r=>r.id===id?{...r,hidden:!r.hidden}:r));}
@@ -317,25 +325,19 @@ export default function App() {
   async function saveZone(){
     if(zonePassword!==ZONE_PASSWORD){setZoneError("Contraseña incorrecta");return;}
     if(!zoneName.trim()){setZoneError("Escribe un nombre");return;}
-    if(currentPoints.length<3){setZoneError("Dibuja al menos 3 puntos");return;}
+    if(currentPoints.length<3){setZoneError("Mínimo 3 puntos");return;}
     const id=`zone_${Date.now()}`;
     await setDoc(doc(db,"exclusion_zones",id),{name:zoneName.trim(),points:currentPoints,color:ZONE_COLORS[zones.length%ZONE_COLORS.length],createdAt:new Date().toISOString()});
     setShowZoneModal(false);setZoneName("");setZonePassword("");setZoneError("");setCurrentPoints([]);setDrawing(false);
   }
-
   async function deleteZone(){
     if(deletePassword!==ZONE_PASSWORD){setDeleteError("Contraseña incorrecta");return;}
     await deleteDoc(doc(db,"exclusion_zones",deleteConfirm));
     setDeleteConfirm(null);setDeletePassword("");setDeleteError("");
   }
-
-  function handleMapClick(e){
-    if(!drawing)return;
-    setCurrentPoints(prev=>[...prev,{lat:e.latLng.lat(),lng:e.latLng.lng()}]);
-  }
+  function handleMapClick(e){if(!drawing)return;setCurrentPoints(prev=>[...prev,{lat:e.latLng.lat(),lng:e.latLng.lng()}]);}
   function closePolygon(){if(currentPoints.length<3){alert("Mínimo 3 puntos");return;}setShowZoneModal(true);}
   function cancelDrawing(){setDrawing(false);setCurrentPoints([]);setShowZoneModal(false);setZoneName("");setZonePassword("");setZoneError("");}
-
   function goTo(d){setSelected(d);if(mapRef.current){mapRef.current.panTo({lat:d.lat,lng:d.lng});mapRef.current.setZoom(16);}}
 
   const filtered=data.filter(d=>{
@@ -359,19 +361,15 @@ export default function App() {
   const sideBg=dark?"#151820":"#ffffff";
   const appBg=dark?"#0f1117":"#f1f5f9";
 
-  const visibleModes=["mapa","ruteo"];
-
   return (
     <div style={{display:"flex",flexDirection:"column",height:"100vh",background:appBg,fontFamily:"'DM Sans', sans-serif"}}>
-
-      {/* Nav */}
       <div style={{height:48,background:dark?"#151820":"#ffffff",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",padding:"0 20px",gap:4,flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginRight:16}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:"#22d3ee"}}/>
           <span style={{fontSize:15,fontWeight:600,color:textPri}}>Zubale Maps</span>
           <span style={{fontSize:11,padding:"1px 7px",borderRadius:10,background:"#1e0535",color:"#d8b4fe",fontWeight:600}}>V2</span>
         </div>
-        {[...visibleModes,...(mode==="zonas"?["zonas"]:[])].map(m=>(
+        {["mapa","ruteo",...(mode==="zonas"?["zonas"]:[])].map(m=>(
           <button key={m} onClick={()=>{setMode(m);if(m!=="zonas")cancelDrawing();}} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,background:mode===m?(dark?"#1e2436":"#f1f5f9"):"transparent",color:mode===m?textPri:textMut,borderBottom:mode===m?"2px solid #3b82f6":"2px solid transparent"}}>
             {m==="mapa"?"Mapa":m==="ruteo"?"Ruteo":"Zonas"}
           </button>
@@ -391,7 +389,6 @@ export default function App() {
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
         <aside style={{width:290,minWidth:290,background:sideBg,borderRight:`1px solid ${border}`,display:"flex",flexDirection:"column",overflow:"hidden"}}>
 
-          {/* ── MAPA ── */}
           {mode==="mapa"&&(<>
             <div style={{padding:"10px 14px",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
               <div>
@@ -445,7 +442,6 @@ export default function App() {
             </div>
           </>)}
 
-          {/* ── RUTEO ── */}
           {mode==="ruteo"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
@@ -457,6 +453,7 @@ export default function App() {
                 ))}
               </div>
             </div>
+
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 2 — Pedidos por ruta</p>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
@@ -465,25 +462,39 @@ export default function App() {
                 <button onClick={()=>setBatchSize(b=>Math.min(10,b+1))} style={{width:30,height:30,borderRadius:6,background:inputBg,border:`1px solid ${inputBdr}`,color:textMut,fontSize:18,cursor:"pointer"}}>+</button>
                 <span style={{fontSize:12,color:textMut}}>pedidos por ruta</span>
               </div>
+            </div>
+
+            {/* Slider distancia máxima */}
+            <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                <p style={{fontSize:11,color:textMut,textTransform:"uppercase",letterSpacing:"0.06em"}}>Distancia máxima entre puntos</p>
+                <span style={{fontSize:13,fontWeight:600,color:textPri}}>{maxDistKm} km</span>
+              </div>
+              <input type="range" min="1" max="5" step="0.5" value={maxDistKm}
+                onChange={e=>setMaxDistKm(parseFloat(e.target.value))}
+                style={{width:"100%"}}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:textMut,marginTop:3}}>
+                <span>1 km</span>
+                <span>3 km</span>
+                <span>5 km</span>
+              </div>
+            </div>
+
+            <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`,display:"flex",flexDirection:"column",gap:6}}>
               {selectedWindow&&(
-                <div style={{marginTop:8,fontSize:11,color:textMut}}>
-                  {pendingCount} pendientes · {routedIds.size} ya ruteados hoy
+                <div style={{fontSize:11,color:textMut,marginBottom:2}}>
+                  {pendingCount} pendientes · {routedIds.size} ruteados hoy
                   {zones.length>0&&<span style={{color:"#f59e0b",marginLeft:6}}>· {zones.length} zona{zones.length>1?"s":""} excluida{zones.length>1?"s":""}</span>}
                 </div>
               )}
-            </div>
-            <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`,display:"flex",flexDirection:"column",gap:6}}>
-              {/* Generar — solo pendientes */}
               <button onClick={()=>handleGenerate(false)} disabled={!selectedWindow||pendingCount===0} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:selectedWindow&&pendingCount>0?"pointer":"default",fontSize:13,fontWeight:500,color:"#fff",background:selectedWindow&&pendingCount>0?VENTANA_PALETTE[selectedWindow]:"#334155"}}>
-                {selectedWindow
-                  ?pendingCount>0?`Generar rutas (${pendingCount} nuevos)`:"Sin pedidos nuevos"
-                  :"Selecciona una ventana"}
+                {selectedWindow?pendingCount>0?`Generar rutas (${pendingCount} nuevos)`:"Sin pedidos nuevos":"Selecciona una ventana"}
               </button>
-              {/* Reordenar — todos */}
               <button onClick={()=>handleGenerate(true)} disabled={!selectedWindow} style={{width:"100%",padding:"9px",borderRadius:8,border:`1px solid ${border}`,cursor:selectedWindow?"pointer":"default",fontSize:12,fontWeight:500,color:textMut,background:"transparent"}}>
                 Reordenar todo (incluye ya ruteados)
               </button>
             </div>
+
             <div style={{flex:1,overflowY:"auto",padding:8}}>
               {routes.length===0?(
                 <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px",lineHeight:1.6}}>Selecciona una ventana y genera las rutas</div>
@@ -543,7 +554,6 @@ export default function App() {
             </div>
           </>)}
 
-          {/* ── ZONAS (oculto, acceso con ZZ) ── */}
           {mode==="zonas"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
@@ -551,44 +561,39 @@ export default function App() {
                 <p style={{fontSize:13,fontWeight:600,color:textPri}}>Zonas de exclusión</p>
                 <button onClick={()=>setMode("mapa")} style={{marginLeft:"auto",fontSize:11,padding:"2px 8px",borderRadius:6,border:`1px solid ${border}`,background:"transparent",color:textMut,cursor:"pointer"}}>✕ Salir</button>
               </div>
-              <p style={{fontSize:12,color:textMut,marginBottom:10,lineHeight:1.5}}>Pedidos dentro de estas zonas serán excluidos del ruteo automáticamente.</p>
+              <p style={{fontSize:12,color:textMut,marginBottom:10,lineHeight:1.5}}>Pedidos dentro de estas zonas serán excluidos del ruteo.</p>
               {!drawing?(
-                <button onClick={()=>setDrawing(true)} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#ef4444"}}>
-                  + Dibujar nueva zona
-                </button>
+                <button onClick={()=>setDrawing(true)} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#ef4444"}}>+ Dibujar nueva zona</button>
               ):(
                 <div>
                   <div style={{fontSize:12,color:"#f59e0b",marginBottom:8,padding:"8px",background:dark?"#1c1206":"#fffbeb",borderRadius:6,lineHeight:1.5}}>
-                    Haz clic en el mapa para marcar los puntos. Mínimo 3.
+                    Haz clic en el mapa para marcar puntos. Mínimo 3.
                     <br/><strong style={{color:"#f1f5f9"}}>{currentPoints.length} puntos</strong> marcados
                   </div>
                   <div style={{display:"flex",gap:6}}>
                     <button onClick={closePolygon} disabled={currentPoints.length<3} style={{flex:1,padding:"8px",borderRadius:8,border:"none",cursor:currentPoints.length>=3?"pointer":"default",fontSize:12,fontWeight:500,color:"#fff",background:currentPoints.length>=3?"#22c55e":"#334155"}}>Cerrar zona</button>
-                    <button onClick={cancelDrawing} style={{flex:1,padding:"8px",borderRadius:8,border:`1px solid ${border}`,cursor:"pointer",fontSize:12,fontWeight:500,color:textMut,background:"transparent"}}>Cancelar</button>
+                    <button onClick={cancelDrawing} style={{flex:1,padding:"8px",borderRadius:8,border:`1px solid ${border}`,cursor:"pointer",fontSize:12,color:textMut,background:"transparent"}}>Cancelar</button>
                   </div>
                 </div>
               )}
             </div>
             <div style={{flex:1,overflowY:"auto",padding:8}}>
               {zones.length===0?(
-                <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px",lineHeight:1.6}}>No hay zonas. Dibuja una en el mapa.</div>
-              ):(
-                zones.map(z=>(
-                  <div key={z.id} style={{borderRadius:8,border:`1px solid ${z.color}44`,marginBottom:5,padding:"10px 12px",background:z.color+"11"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{width:10,height:10,borderRadius:"50%",background:z.color,flexShrink:0}}/>
-                      <span style={{fontSize:13,fontWeight:600,color:textPri,flex:1}}>{z.name}</span>
-                      <button onClick={()=>{setDeleteConfirm(z.id);setDeletePassword("");setDeleteError("");}} style={{fontSize:11,padding:"2px 8px",borderRadius:6,border:"1px solid #ef444444",background:"#ef444411",color:"#ef4444",cursor:"pointer"}}>Borrar</button>
-                    </div>
-                    <div style={{fontSize:11,color:textMut,marginTop:4}}>{z.points.length} puntos · {new Date(z.createdAt).toLocaleDateString("es-CL")}</div>
+                <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px"}}>No hay zonas. Dibuja una en el mapa.</div>
+              ):zones.map(z=>(
+                <div key={z.id} style={{borderRadius:8,border:`1px solid ${z.color}44`,marginBottom:5,padding:"10px 12px",background:z.color+"11"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{width:10,height:10,borderRadius:"50%",background:z.color,flexShrink:0}}/>
+                    <span style={{fontSize:13,fontWeight:600,color:textPri,flex:1}}>{z.name}</span>
+                    <button onClick={()=>{setDeleteConfirm(z.id);setDeletePassword("");setDeleteError("");}} style={{fontSize:11,padding:"2px 8px",borderRadius:6,border:"1px solid #ef444444",background:"#ef444411",color:"#ef4444",cursor:"pointer"}}>Borrar</button>
                   </div>
-                ))
-              )}
+                  <div style={{fontSize:11,color:textMut,marginTop:4}}>{z.points.length} puntos · {new Date(z.createdAt).toLocaleDateString("es-CL")}</div>
+                </div>
+              ))}
             </div>
           </>)}
         </aside>
 
-        {/* Mapa */}
         <div style={{flex:1,position:"relative"}}>
           {!isLoaded
             ?<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"#475569"}}>Cargando mapa...</div>
@@ -600,11 +605,9 @@ export default function App() {
                 {zones.map(z=>(
                   <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.15,strokeColor:z.color,strokeOpacity:0.8,strokeWeight:2}}/>
                 ))}
-                {drawing&&currentPoints.length>=2&&(
-                  <Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>
-                )}
+                {drawing&&currentPoints.length>=2&&<Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>}
                 {drawing&&currentPoints.map((p,i)=>(
-                  <Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="#ef4444" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>
+                  <Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#ef4444" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>
                 ))}
 
                 {mode==="mapa"&&filtered.map(d=>(
