@@ -74,6 +74,7 @@ function distKm(a,b) {
 }
 
 // Diámetro = distancia máxima entre cualquier par del grupo
+// Diámetro = distancia máxima entre cualquier par del grupo
 function groupDiameter(group) {
   let max = 0;
   for (let i = 0; i < group.length; i++)
@@ -82,79 +83,91 @@ function groupDiameter(group) {
   return max;
 }
 
-// Encuentra el grupo MÁS COMPACTO de batchSize puntos en TODO el pool
-// Sin preferencia por norte/sur — busca el grupo con menor diámetro global
-function findMostCompactGroup(pool, batchSize, maxDistKm) {
-  if (pool.length < batchSize) return null;
-
-  // Para cada punto como seed, buscar sus (batchSize-1) vecinos más cercanos
-  // y evaluar el diámetro del grupo resultante
-  let bestGrp = null, bestDiam = Infinity;
-
-  for (let si = 0; si < pool.length; si++) {
-    const seed = pool[si];
-    // Vecinos más cercanos al seed (ventana de búsqueda limitada para performance)
-    const neighbors = pool
-      .filter((_, i) => i !== si)
-      .sort((a, b) => distKm(seed, a) - distKm(seed, b))
-      .slice(0, Math.min((batchSize - 1) * 4, pool.length - 1));
-
-    const need = batchSize - 1;
-
-    // Probar combinaciones de vecinos
-    function combine(start, current) {
-      if (current.length === need) {
-        const grp = [seed, ...current];
-        const diam = groupDiameter(grp);
-        if (diam <= maxDistKm && diam < bestDiam) {
-          bestDiam = diam;
-          bestGrp = [...grp];
-        }
-        return;
-      }
-      if (neighbors.length - start < need - current.length) return;
-      for (let i = start; i < neighbors.length; i++) {
-        combine(i + 1, [...current, neighbors[i]]);
-      }
-    }
-    combine(0, []);
-  }
-
-  return bestGrp;
-}
-
-// Generar rutas: busca siempre el grupo MÁS COMPACTO disponible
-// Solo rutas COMPLETAS — sobrantes van a sinAsignar (no se marcan como ruteados)
-function generateRoutes(orders, batchSize, maxDistKm) {
-  if (orders.length === 0) return { routes: [], sinAsignar: [] };
-
+// PASO 1: Solución inicial greedy — grupo más compacto disponible
+function greedyRoutes(orders, batchSize, maxDistKm) {
   const pool = [...orders];
   const routes = [];
   let colorIdx = 0;
-
   while (pool.length >= batchSize) {
-    const grp = findMostCompactGroup(pool, batchSize, maxDistKm);
-    if (!grp) break; // ningún grupo válido dentro del maxDistKm
-
-    // Remover del pool
-    grp.forEach(o => {
-      const idx = pool.findIndex(p => p.id === o.id);
-      if (idx !== -1) pool.splice(idx, 1);
-    });
-
-    routes.push({
-      id: `R${routes.length+1}`,
-      label: `Ruta ${routes.length+1}`,
-      color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
-      orders: grp,
-      hidden: false,
-      routeNum: routes.length+1,
-    });
+    let bestGrp = null, bestDiam = Infinity;
+    for (let si = 0; si < pool.length; si++) {
+      const seed = pool[si];
+      const neighbors = pool.filter((_,i)=>i!==si).sort((a,b)=>distKm(seed,a)-distKm(seed,b)).slice(0,Math.min((batchSize-1)*4,pool.length-1));
+      const need = batchSize-1;
+      function combine(start,current) {
+        if(current.length===need){const grp=[seed,...current];const diam=groupDiameter(grp);if(diam<=maxDistKm&&diam<bestDiam){bestDiam=diam;bestGrp=[...grp];}return;}
+        if(neighbors.length-start<need-current.length)return;
+        for(let i=start;i<neighbors.length;i++)combine(i+1,[...current,neighbors[i]]);
+      }
+      combine(0,[]);
+    }
+    if(!bestGrp)break;
+    bestGrp.forEach(o=>{const idx=pool.findIndex(p=>p.id===o.id);if(idx!==-1)pool.splice(idx,1);});
+    routes.push({id:`R${routes.length+1}`,label:`Ruta ${routes.length+1}`,color:ROUTE_COLORS[colorIdx%ROUTE_COLORS.length],orders:bestGrp,hidden:false,routeNum:routes.length+1});
     colorIdx++;
   }
-
-  return { routes, sinAsignar: pool };
+  return {routes,sinAsignar:pool};
 }
+
+// PASO 2: Swap optimization — intercambia puntos entre rutas si mejora diámetro total
+function optimizeSwaps(routes, maxDistKm) {
+  if(routes.length<2)return routes;
+  const rs=routes.map(r=>({...r,orders:[...r.orders]}));
+  let improved=true,iter=0;
+  while(improved&&iter<1000){
+    improved=false;iter++;
+    for(let ri=0;ri<rs.length;ri++){
+      for(let rj=ri+1;rj<rs.length;rj++){
+        for(let pi=0;pi<rs[ri].orders.length;pi++){
+          for(let pj=0;pj<rs[rj].orders.length;pj++){
+            const dBefore=groupDiameter(rs[ri].orders)+groupDiameter(rs[rj].orders);
+            const tmp=rs[ri].orders[pi];rs[ri].orders[pi]=rs[rj].orders[pj];rs[rj].orders[pj]=tmp;
+            const d1=groupDiameter(rs[ri].orders),d2=groupDiameter(rs[rj].orders);
+            if(d1+d2<dBefore&&d1<=maxDistKm&&d2<=maxDistKm){improved=true;}
+            else{rs[rj].orders[pj]=rs[ri].orders[pi];rs[ri].orders[pi]=tmp;}
+          }
+        }
+      }
+    }
+  }
+  return rs;
+}
+
+// PASO 3: Intentar absorber pendientes en rutas existentes via swap
+function absorbPending(routes, sinAsignar, maxDistKm) {
+  if(sinAsignar.length===0||routes.length===0)return{routes,sinAsignar};
+  const rs=routes.map(r=>({...r,orders:[...r.orders]}));
+  const remaining=[...sinAsignar];
+  for(let pi=remaining.length-1;pi>=0;pi--){
+    const pending=remaining[pi];
+    let bestRi=-1,bestOi=-1,bestImprovement=0;
+    for(let ri=0;ri<rs.length;ri++){
+      for(let oi=0;oi<rs[ri].orders.length;oi++){
+        const dBefore=groupDiameter(rs[ri].orders);
+        const testOrders=[...rs[ri].orders];testOrders[oi]=pending;
+        const dAfter=groupDiameter(testOrders);
+        const improvement=dBefore-dAfter;
+        if(dAfter<=maxDistKm&&improvement>bestImprovement){bestImprovement=improvement;bestRi=ri;bestOi=oi;}
+      }
+    }
+    if(bestRi!==-1){
+      const displaced=rs[bestRi].orders[bestOi];
+      rs[bestRi].orders[bestOi]=pending;
+      remaining.splice(pi,1);
+      remaining.push(displaced);
+    }
+  }
+  return{routes:rs,sinAsignar:remaining};
+}
+
+// Pipeline: greedy → swap optimization → absorb pending
+function generateRoutes(orders, batchSize, maxDistKm) {
+  if(orders.length===0)return{routes:[],sinAsignar:[]};
+  const{routes:initial,sinAsignar}=greedyRoutes(orders,batchSize,maxDistKm);
+  const optimized=optimizeSwaps(initial,maxDistKm);
+  return absorbPending(optimized,sinAsignar,maxDistKm);
+}
+
 
 function convexHull(points) {
   if(points.length<3) return points;
@@ -205,6 +218,8 @@ export default function App() {
   const [takenIds,setTakenIds]   = useState(new Set());
   const [routedIds,setRoutedIds] = useState(new Set());
   const [selectedWindow,setSelectedWindow] = useState(null);
+  const [generating,setGenerating]         = useState(false);
+  const [reassigning,setReassigning]       = useState(null);
   const [batchSize,setBatchSize]           = useState(3);
   const [maxDistKm,setMaxDistKm]           = useState(3);
   const [routes,setRoutes]                 = useState([]);
@@ -277,8 +292,10 @@ export default function App() {
 
   useEffect(()=>{setSelected(null);setActiveRoute(null);},[mode]);
 
-  function handleGenerate(includeAll=false){
-    if(!selectedWindow)return;
+  async function handleGenerate(includeAll=false){
+    if(!selectedWindow||generating)return;
+    setGenerating(true);
+    await new Promise(r=>setTimeout(r,50)); // allow UI to update
     const windowOrders=data.filter(d=>d.window===selectedWindow);
     const excl=windowOrders.filter(o=>isExcluded(o,zones));
     const nonExcluded=windowOrders.filter(o=>!isExcluded(o,zones));
@@ -290,7 +307,34 @@ export default function App() {
     setSinAsignar(sa);
     setExcludedOrders(excl);
     setActiveRoute(null);
+    setGenerating(false);
     if(mapRef.current&&toRoute.length>0){mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});mapRef.current.setZoom(12);}
+  }
+
+  // Mover un pedido de una ruta a otra manualmente
+  function reassignOrder(orderId, fromRouteId, toRouteId) {
+    setRoutes(prev => {
+      const rs = prev.map(r => ({...r, orders:[...r.orders]}));
+      const fromR = rs.find(r=>r.id===fromRouteId);
+      const toR   = rs.find(r=>r.id===toRouteId);
+      if(!fromR||!toR) return prev;
+      const idx = fromR.orders.findIndex(o=>o.id===orderId);
+      if(idx===-1) return prev;
+      const [order] = fromR.orders.splice(idx,1);
+      toR.orders.push(order);
+      // Limpiar rutas vacías
+      return rs.filter(r=>r.orders.length>0);
+    });
+    setSelected(null);
+    setReassigning(null);
+  }
+
+  // Mover un pedido de sinAsignar a una ruta
+  function assignToRoute(orderId, toRouteId) {
+    setSinAsignar(prev => prev.filter(o=>o.id!==orderId));
+    setRoutes(prev => prev.map(r => r.id===toRouteId ? {...r, orders:[...r.orders, sinAsignar.find(o=>o.id===orderId)].filter(Boolean)} : r));
+    setSelected(null);
+    setReassigning(null);
   }
 
   function toggleHideRoute(id){setRoutes(prev=>prev.map(r=>r.id===id?{...r,hidden:!r.hidden}:r));}
@@ -430,11 +474,11 @@ export default function App() {
             </div>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`,display:"flex",flexDirection:"column",gap:6}}>
               {selectedWindow&&<div style={{fontSize:11,color:textMut,marginBottom:2}}>{pendingCount} pendientes · {routedIds.size} ruteados hoy{zones.length>0&&<span style={{color:"#f59e0b",marginLeft:6}}>· {zones.length} zona{zones.length>1?"s":""} excluida{zones.length>1?"s":""}</span>}</div>}
-              <button onClick={()=>handleGenerate(false)} disabled={!selectedWindow||pendingCount===0} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:selectedWindow&&pendingCount>0?"pointer":"default",fontSize:13,fontWeight:500,color:"#fff",background:selectedWindow&&pendingCount>0?VENTANA_PALETTE[selectedWindow]:"#334155"}}>
-                {selectedWindow?pendingCount>0?`Generar rutas (${pendingCount} nuevos)`:"Sin pedidos nuevos":"Selecciona una ventana"}
+              <button onClick={()=>handleGenerate(false)} disabled={!selectedWindow||pendingCount===0||generating} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:selectedWindow&&pendingCount>0&&!generating?"pointer":"default",fontSize:13,fontWeight:500,color:"#fff",background:selectedWindow&&pendingCount>0&&!generating?VENTANA_PALETTE[selectedWindow]:"#334155"}}>
+                {generating?"⟳ Optimizando rutas...":selectedWindow?pendingCount>0?`Generar rutas (${pendingCount} nuevos)`:"Sin pedidos nuevos":"Selecciona una ventana"}
               </button>
-              <button onClick={()=>handleGenerate(true)} disabled={!selectedWindow} style={{width:"100%",padding:"9px",borderRadius:8,border:`1px solid ${border}`,cursor:selectedWindow?"pointer":"default",fontSize:12,fontWeight:500,color:textMut,background:"transparent"}}>
-                Reordenar todo (incluye ya ruteados)
+              <button onClick={()=>handleGenerate(true)} disabled={!selectedWindow||generating} style={{width:"100%",padding:"9px",borderRadius:8,border:`1px solid ${border}`,cursor:selectedWindow&&!generating?"pointer":"default",fontSize:12,fontWeight:500,color:textMut,background:"transparent"}}>
+                {generating?"⟳ Optimizando...":"Reordenar todo (incluye ya ruteados)"}
               </button>
             </div>
             <div style={{flex:1,overflowY:"auto",padding:8}}>
@@ -577,14 +621,31 @@ export default function App() {
               {mode==="ruteo"&&sinAsignar.map(o=><Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makePendingPin()} onClick={()=>setSelected(o)}/>)}
               {mode==="ruteo"&&excludedOrders.map(o=><Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeExcludedPin()} onClick={()=>setSelected(o)}/>)}
               {mode==="ruteo"&&selected&&(
-                <InfoWindow position={{lat:selected.lat,lng:selected.lng}} onCloseClick={()=>setSelected(null)}>
-                  <div style={{fontFamily:"sans-serif",minWidth:180,padding:4}}>
-                    <p style={{fontWeight:700,fontSize:14,marginBottom:4,color:"#0f172a"}}>{selected.id}</p>
-                    <p style={{fontSize:12,color:"#475569",marginBottom:10,lineHeight:1.4}}>{selected.address}</p>
-                    <div style={{display:"flex",gap:6}}>
+                <InfoWindow position={{lat:selected.lat,lng:selected.lng}} onCloseClick={()=>{setSelected(null);setReassigning(null);}}>
+                  <div style={{fontFamily:"sans-serif",minWidth:200,padding:4}}>
+                    <p style={{fontWeight:700,fontSize:14,marginBottom:2,color:"#0f172a"}}>{selected.id}</p>
+                    <p style={{fontSize:11,color:"#475569",marginBottom:8,lineHeight:1.4}}>{selected.address}</p>
+                    <div style={{display:"flex",gap:6,marginBottom:reassigning===selected.id?8:0}}>
                       <span style={{fontSize:11,padding:"2px 8px",borderRadius:8,fontWeight:600,background:VENTANA_PALETTE[selected.window]+"25",color:VENTANA_PALETTE[selected.window]}}>{selected.window}</span>
-                      <button onClick={()=>toggleTaken(selected.id)} style={{fontSize:11,padding:"3px 10px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"none",background:takenIds.has(selected.id)?"#dcfce7":"#fee2e2",color:takenIds.has(selected.id)?"#15803d":"#b91c1c"}}>{takenIds.has(selected.id)?"✓ Desmarcar":"Marcar tomado"}</button>
+                      <button onClick={()=>toggleTaken(selected.id)} style={{fontSize:11,padding:"3px 8px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"none",background:takenIds.has(selected.id)?"#dcfce7":"#fee2e2",color:takenIds.has(selected.id)?"#15803d":"#b91c1c"}}>{takenIds.has(selected.id)?"✓ Desmarcar":"Marcar tomado"}</button>
+                      <button onClick={()=>setReassigning(reassigning===selected.id?null:selected.id)} style={{fontSize:11,padding:"3px 8px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"1px solid #3b82f688",background:"#eff6ff",color:"#1d4ed8"}}>↔ Mover</button>
                     </div>
+                    {reassigning===selected.id&&(
+                      <div>
+                        <p style={{fontSize:11,color:"#475569",marginBottom:4}}>Mover a:</p>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                          {routes.filter(r=>!r.orders.some(o=>o.id===selected.id)).map(r=>(
+                            <button key={r.id} onClick={()=>{
+                              const fromRoute=routes.find(rt=>rt.orders.some(o=>o.id===selected.id));
+                              if(fromRoute) reassignOrder(selected.id,fromRoute.id,r.id);
+                              else assignToRoute(selected.id,r.id);
+                            }} style={{fontSize:11,padding:"3px 8px",borderRadius:8,fontWeight:600,cursor:"pointer",border:`1px solid ${r.color}88`,background:r.color+"22",color:r.color}}>
+                              {r.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </InfoWindow>
               )}
