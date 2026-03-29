@@ -935,6 +935,15 @@ export default function App() {
                     }}
                     onClick={()=>setActiveOrgZone(isAct?null:z.id)}
                   />
+                  <Marker
+                    position={{lat:z.points.reduce((s,p)=>s+p.lat,0)/z.points.length,lng:z.points.reduce((s,p)=>s+p.lng,0)/z.points.length}}
+                    onClick={()=>setActiveOrgZone(isAct?null:z.id)}
+                    icon={{
+                      url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="120" height="24" viewBox="0 0 120 24"><text x="60" y="17" text-anchor="middle" font-size="13" font-weight="600" fill="${z.color}" opacity="0.55" font-family="Arial,sans-serif">${z.name}</text></svg>`)}`,
+                      scaledSize:{width:120,height:24},
+                      anchor:{x:60,y:12},
+                    }}
+                  />
                   {zoneOrders.map(d=>(
                     <Marker key={d.id} position={{lat:d.lat,lng:d.lng}}
                       onClick={()=>goTo(d)}
