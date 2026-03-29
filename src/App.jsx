@@ -27,6 +27,11 @@ const ROUTE_COLORS = [
   "#06b6d4","#f43f5e","#8b5cf6","#10b981","#fb923c",
 ];
 const ZONE_COLORS = ["#ef4444","#f97316","#a855f7","#ec4899","#6366f1","#14b8a6"];
+const ORG_ZONE_COLORS = [
+  "#3b82f6","#22c55e","#f97316","#a855f7","#ef4444","#14b8a6","#f59e0b","#ec4899",
+  "#6366f1","#84cc16","#06b6d4","#f43f5e","#8b5cf6","#10b981","#fb923c","#0ea5e9",
+  "#d946ef","#facc15","#4ade80","#f87171"
+];
 
 function makeRoutePinSvg(hex, routeNum, taken=false) {
   const c=taken?"#64748b":(hex||"#3b82f6");
@@ -825,7 +830,16 @@ export default function App() {
               onClick={mode==="zonas"&&drawing?handleMapClick:mode==="orgZonas"&&drawingOrg?handleOrgMapClick:undefined}
               options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
 
-              {zones.map(z=><Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.6,strokeWeight:1.5}}/>)}
+              {zones.map(z=>{
+                const cLat=z.points.reduce((s,p)=>s+p.lat,0)/z.points.length;
+                const cLng=z.points.reduce((s,p)=>s+p.lng,0)/z.points.length;
+                return(
+                  <React.Fragment key={z.id}>
+                    <Polygon paths={z.points} options={{fillColor:"#ef4444",fillOpacity:0.08,strokeColor:"#ef4444",strokeOpacity:0.7,strokeWeight:1.5}}/>
+                    <Marker position={{lat:cLat,lng:cLng}} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28"><circle cx="14" cy="14" r="12" fill="#ef4444" opacity="0.85"/><line x1="8" y1="8" x2="20" y2="20" stroke="white" stroke-width="2.5" stroke-linecap="round"/><line x1="20" y1="8" x2="8" y2="20" stroke="white" stroke-width="2.5" stroke-linecap="round"/></svg>`)}`,scaledSize:{width:28,height:28},anchor:{x:14,y:14}}}/>
+                  </React.Fragment>
+                );
+              })}
               {drawing&&currentPoints.length>=2&&<Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>}
               {drawing&&currentPoints.map((p,i)=><Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#ef4444" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>)}
 
@@ -890,11 +904,23 @@ export default function App() {
           )}
 
           {/* Org zones on map - always visible */}
-          {orgZones.map(z=>(
-            <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:activeOrgZone===z.id?0.2:0.08,strokeColor:z.color,strokeOpacity:activeOrgZone===z.id?0.9:0.5,strokeWeight:activeOrgZone===z.id?2:1.5}}
-              onClick={()=>mode==="orgZonas"&&setActiveOrgZone(activeOrgZone===z.id?null:z.id)}/>
-          ))}
-          {drawingOrg&&orgPoints.length>=2&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.1,strokeColor:"#22c55e",strokeOpacity:0.8,strokeWeight:2}}/>}
+          {orgZones.map(z=>{
+            const cLat=z.points.reduce((s,p)=>s+p.lat,0)/z.points.length;
+            const cLng=z.points.reduce((s,p)=>s+p.lng,0)/z.points.length;
+            const isAct=activeOrgZone===z.id;
+            const cnt=ordersInZone(z).filter(d=>orgFilter==="all"||d.window===orgFilter).length;
+            return(
+              <React.Fragment key={z.id}>
+                <Polygon paths={z.points} options={{fillColor:z.color,fillOpacity:isAct?0.22:0.1,strokeColor:z.color,strokeOpacity:isAct?1:0.6,strokeWeight:isAct?2.5:1.5}}
+                  onClick={()=>mode==="orgZonas"&&setActiveOrgZone(isAct?null:z.id)}/>
+                <Marker position={{lat:cLat,lng:cLng}}
+                  onClick={()=>mode==="orgZonas"&&setActiveOrgZone(isAct?null:z.id)}
+                  icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="80" height="28" viewBox="0 0 80 28"><rect x="0" y="0" width="80" height="28" rx="6" fill="${z.color}" opacity="0.92"/><text x="40" y="18" text-anchor="middle" font-size="11" font-weight="600" fill="white" font-family="sans-serif">${z.name} · ${cnt}</text></svg>`)}`,scaledSize:{width:80,height:28},anchor:{x:40,y:14}}}/>
+              </React.Fragment>
+            );
+          })}
+          {drawingOrg&&orgPoints.length>=2&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.15,strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2}}/>}
+          {drawingOrg&&orgPoints.length>=2&&<Polyline path={[...orgPoints,orgPoints[0]]} options={{strokeColor:"#22c55e",strokeOpacity:0.6,strokeWeight:1.5,strokeDasharray:"5 5"}}/>}
           {drawingOrg&&orgPoints.map((p,i)=><Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#22c55e" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>)}
 
           {/* Org zones modal */}
@@ -908,9 +934,9 @@ export default function App() {
                 </div>
                 <div style={{marginBottom:12}}>
                   <p style={{fontSize:12,color:textMut,marginBottom:6}}>Color de la zona</p>
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                    {["#3b82f6","#22c55e","#f97316","#a855f7","#ef4444","#14b8a6","#f59e0b","#ec4899"].map(c=>(
-                      <div key={c} onClick={()=>setOrgZoneColor(c)} style={{width:24,height:24,borderRadius:"50%",background:c,cursor:"pointer",border:orgZoneColor===c?"3px solid #fff":"2px solid transparent",boxSizing:"border-box"}}/>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                    {ORG_ZONE_COLORS.map(c=>(
+                      <div key={c} onClick={()=>setOrgZoneColor(c)} style={{width:22,height:22,borderRadius:"50%",background:c,cursor:"pointer",border:orgZoneColor===c?"3px solid #fff":"2px solid transparent",boxSizing:"border-box"}}/>
                     ))}
                   </div>
                 </div>
