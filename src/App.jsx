@@ -13,7 +13,7 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
-const ZONE_PASSWORD = "Alexander0097";
+const ZONE_PASSWORD = "0097";
 
 const VENTANA_PALETTE = {
   "V9":"#3b82f6","V10":"#f97316","V11":"#22c55e","V12":"#a855f7",
@@ -241,10 +241,7 @@ function isExcluded(order,zones){return zones.some(z=>pointInPolygon({lat:order.
 function getTodayKey(){return new Date().toISOString().split("T")[0];}
 function getRoutedKey(){return `routed_${new Date().toISOString().split("T")[0]}`;}
 
-const MOCK_DATA=[
-  {id:"SG-001",address:"Av. Providencia 1234, Providencia",window:"V9",lat:-33.432,lng:-70.608},
-  {id:"SG-002",address:"Av. Apoquindo 4500, Las Condes",window:"V10",lat:-33.415,lng:-70.580},
-];
+const MOCK_DATA=[];
 
 export default function App() {
   const GOOGLE_MAPS_API_KEY=import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
@@ -553,7 +550,12 @@ export default function App() {
         ))}
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
           {SHEETS_URL&&<span onClick={fetchSheets} style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:loading?"#2c1006":"#0c1d35",color:loading?"#fdba74":"#93c5fd",fontWeight:500,cursor:"pointer"}}>{loading?"⟳ Cargando...":lastSync?`⟳ ${lastSync}`:"⟳ Live"}</span>}
-          {lastSync&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>{sheetMeta?`Actualización Sheet: ${sheetMeta}`:`Sheet sync: ${lastSync}`}</span>}
+          {sheetMeta&&(()=>{
+            // Extract time from "Última actualización: 29-03-2026, 12:45:38 a. m."
+            const match=sheetMeta.match(/(\d{1,2}:\d{2}:\d{2}\s*[ap]\.\s*m\.?)/i);
+            const display=match?match[1]:sheetMeta;
+            return <span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>⟳ Sheet {display}</span>;
+          })()}
           <button onClick={()=>setDarkMap(d=>!d)} style={{background:inputBg,border:`1px solid ${inputBdr}`,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:500,color:textMut}}>{dark?"☀ Claro":"☾ Oscuro"}</button>
         </div>
       </div>
@@ -912,9 +914,14 @@ export default function App() {
                   </div>
                 </InfoWindow>
               )}
-            {/* Org zones - inside GoogleMap */}
-            {orgZones.map(z=>{
+            {/* Org zones - only visible in orgZonas mode */}
+            {mode==="orgZonas"&&orgZones.map(z=>{
               const isAct=activeOrgZone===z.id;
+              // Pedidos dentro de la zona con filtro de ventana
+              const zoneOrders=data.filter(d=>
+                pointInPolygon({lat:d.lat,lng:d.lng},z.points)&&
+                (orgFilter==="all"||d.window===orgFilter)
+              );
               return(
                 <React.Fragment key={z.id}>
                   <Polygon
@@ -928,12 +935,22 @@ export default function App() {
                     }}
                     onClick={()=>setActiveOrgZone(isAct?null:z.id)}
                   />
+                  {zoneOrders.map(d=>(
+                    <Marker key={d.id} position={{lat:d.lat,lng:d.lng}}
+                      onClick={()=>goTo(d)}
+                      icon={{
+                        url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="${z.color}"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.9"/></svg>`)}`,
+                        scaledSize:{width:22,height:30},
+                        anchor:{x:11,y:30},
+                      }}
+                    />
+                  ))}
                 </React.Fragment>
               );
             })}
-            {drawingOrg&&orgPoints.length>=3&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.2,strokeColor:"#22c55e",strokeOpacity:1,strokeWeight:2.5}}/>}
-            {drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:1,strokeWeight:2.5}}/>}
-            {drawingOrg&&orgPoints.map((p,i)=>(
+            {mode==="orgZonas"&&drawingOrg&&orgPoints.length>=3&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.2,strokeColor:"#22c55e",strokeOpacity:1,strokeWeight:2.5}}/>}
+            {mode==="orgZonas"&&drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:1,strokeWeight:2.5}}/>}
+            {mode==="orgZonas"&&drawingOrg&&orgPoints.map((p,i)=>(
               <Marker key={i} position={p}
                 label={{text:String(i+1),color:"#ffffff",fontWeight:"bold",fontSize:"11px"}}
               />
