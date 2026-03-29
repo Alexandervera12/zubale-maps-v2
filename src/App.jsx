@@ -553,7 +553,7 @@ export default function App() {
         ))}
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
           {SHEETS_URL&&<span onClick={fetchSheets} style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:loading?"#2c1006":"#0c1d35",color:loading?"#fdba74":"#93c5fd",fontWeight:500,cursor:"pointer"}}>{loading?"⟳ Cargando...":lastSync?`⟳ ${lastSync}`:"⟳ Live"}</span>}
-          {(sheetMeta||lastSync)&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>Sheet: {sheetMeta||lastSync}</span>}
+          {sheetMeta&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>Actualización: {sheetMeta}</span>}
           <button onClick={()=>setDarkMap(d=>!d)} style={{background:inputBg,border:`1px solid ${inputBdr}`,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:500,color:textMut}}>{dark?"☀ Claro":"☾ Oscuro"}</button>
         </div>
       </div>
@@ -931,12 +931,12 @@ export default function App() {
                   position={{lat:cLat,lng:cLng}}
                   onClick={()=>setActiveOrgZone(isAct?null:z.id)}
                   title={z.name}
-                  label={{text:z.name,color:"#ffffff",fontWeight:"bold",fontSize:"12px"}}
+                  label={{text:z.name,color:z.color,fontWeight:"bold",fontSize:"13px",className:""}}
                   icon={{
-                    url:`data:image/svg+xml;base64,${btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="7" fill="${z.color}" stroke="white" stroke-width="2"/></svg>`)}`,
-                    scaledSize:{width:16,height:16},
-                    anchor:{x:8,y:8},
-                    labelOrigin:{x:8,y:-8},
+                    path:"M 0,0",
+                    fillOpacity:0,
+                    strokeOpacity:0,
+                    scale:0,
                   }}
                 />
               </React.Fragment>
@@ -946,13 +946,7 @@ export default function App() {
           {drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2.5}}/>}
           {drawingOrg&&orgPoints.map((p,i)=>(
             <Marker key={i} position={p}
-              label={{text:String(i+1),color:"white",fontWeight:"bold",fontSize:"11px"}}
-              icon={{
-                url:`data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="11" fill="#22c55e" stroke="white" stroke-width="2"/></svg>')}`,
-                scaledSize:{width:24,height:24},
-                anchor:{x:12,y:12},
-                labelOrigin:{x:12,y:12},
-              }}
+              label={{text:String(i+1),color:"#ffffff",fontWeight:"bold",fontSize:"11px"}}
             />
           ))}
 
