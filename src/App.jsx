@@ -73,97 +73,91 @@ function distKm(a,b) {
   return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
 }
 
-// Verifica que el nuevo punto está dentro de maxDistKm de TODOS los del grupo
-function isCompatible(newPoint, group, maxDistKm) {
-  return group.every(p => distKm(newPoint, p) <= maxDistKm);
+// Diámetro del grupo = distancia máxima entre cualquier par de puntos
+function groupDiameter(group) {
+  let max = 0;
+  for (let i = 0; i < group.length; i++)
+    for (let j = i+1; j < group.length; j++)
+      max = Math.max(max, distKm(group[i], group[j]));
+  return max;
 }
 
-// Clustering estricto: un punto entra solo si está dentro de maxDistKm
-// de TODOS los puntos ya en el cluster
-function clusterStrict(orders, maxDistKm) {
-  const n = orders.length;
-  const assigned = new Array(n).fill(-1);
-  const clusters = [];
+// Encuentra el mejor grupo de batchSize puntos:
+// - El diámetro del grupo (distancia máxima entre cualquier par) <= maxDistKm
+// - Se minimiza el diámetro total del grupo
+// Busca entre los candidatos más cercanos al seed
+function findBestGroup(seed, pool, batchSize, maxDistKm) {
+  const need = batchSize - 1;
+  if (pool.length < need) return null;
 
-  for (let i = 0; i < n; i++) {
-    if (assigned[i] !== -1) continue;
-    const clusterIdx = clusters.length;
-    const cluster = [i];
-    clusters.push(cluster);
-    assigned[i] = clusterIdx;
+  // Ordenar por distancia al seed y tomar ventana de búsqueda
+  const candidates = [...pool]
+    .sort((a, b) => distKm(seed, a) - distKm(seed, b))
+    .slice(0, Math.min(need * 5 + 5, pool.length));
 
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (let j = 0; j < n; j++) {
-        if (assigned[j] !== -1) continue;
-        const clusterPts = cluster.map(idx => orders[idx]);
-        // Debe estar dentro de maxDistKm de TODOS los del cluster
-        if (clusterPts.every(p => distKm(orders[j], p) <= maxDistKm)) {
-          cluster.push(j);
-          assigned[j] = clusterIdx;
-          changed = true;
-        }
+  let bestGrp = null, bestDiam = Infinity;
+
+  // Combinaciones de `need` candidatos
+  function combine(start, current) {
+    if (current.length === need) {
+      const grp = [seed, ...current];
+      const diam = groupDiameter(grp);
+      if (diam <= maxDistKm && diam < bestDiam) {
+        bestDiam = diam;
+        bestGrp = [...grp];
       }
+      return;
+    }
+    // Poda: si ya no hay suficientes candidatos restantes, salir
+    if (candidates.length - start < need - current.length) return;
+    for (let i = start; i < candidates.length; i++) {
+      combine(i + 1, [...current, candidates[i]]);
     }
   }
-  return clusters.map(idxs => idxs.map(i => orders[i]));
+  combine(0, []);
+  return bestGrp;
 }
 
 // Generar rutas: solo rutas COMPLETAS de exactamente batchSize
+// donde el diámetro del grupo <= maxDistKm
 // Los sobrantes van a sinAsignar sin marcarse como ruteados
 function generateRoutes(orders, batchSize, maxDistKm) {
   if (orders.length === 0) return { routes: [], sinAsignar: [] };
 
-  const clusters = clusterStrict(orders, maxDistKm);
+  const pool = [...orders].sort((a, b) => b.lat - a.lat); // norte a sur
   const routes = [];
   const sinAsignar = [];
   let colorIdx = 0;
 
-  clusters.forEach(cluster => {
-    const pool = [...cluster];
-    // Ordenar norte a sur para empezar desde arriba
-    pool.sort((a, b) => b.lat - a.lat);
+  while (pool.length >= batchSize) {
+    const seed = pool[0];
+    const rest = pool.slice(1);
+    const grp = findBestGroup(seed, rest, batchSize, maxDistKm);
 
-    while (pool.length >= batchSize) {
-      const seed = pool.shift();
-      const route = [seed];
-
-      while (route.length < batchSize && pool.length > 0) {
-        const last = route[route.length - 1];
-        // Buscar el más cercano al último que sea compatible con TODO el grupo
-        let bestIdx = -1, bestDist = Infinity;
-        pool.forEach((o, i) => {
-          const d = distKm(last, o);
-          if (d < bestDist && isCompatible(o, route, maxDistKm)) {
-            bestDist = d;
-            bestIdx = i;
-          }
-        });
-        if (bestIdx === -1) break;
-        route.push(pool.splice(bestIdx, 1)[0]);
-      }
-
-      if (route.length === batchSize) {
-        // Ruta completa ✓
-        routes.push({
-          id: `R${routes.length+1}`,
-          label: `Ruta ${routes.length+1}`,
-          color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
-          orders: route,
-          hidden: false,
-          routeNum: routes.length+1,
-        });
-        colorIdx++;
-      } else {
-        // No completó — devolver todo al sinAsignar
-        route.forEach(o => sinAsignar.push(o));
-      }
+    if (grp) {
+      // Remover del pool los puntos del grupo
+      grp.forEach(o => {
+        const idx = pool.findIndex(p => p.id === o.id);
+        if (idx !== -1) pool.splice(idx, 1);
+      });
+      routes.push({
+        id: `R${routes.length+1}`,
+        label: `Ruta ${routes.length+1}`,
+        color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
+        orders: grp,
+        hidden: false,
+        routeNum: routes.length+1,
+      });
+      colorIdx++;
+    } else {
+      // No encontró grupo válido para este seed — va a sinAsignar
+      pool.shift();
+      sinAsignar.push(seed);
     }
+  }
 
-    // Sobrantes que no llegan al batch
-    pool.forEach(o => sinAsignar.push(o));
-  });
+  // Sobrantes finales
+  pool.forEach(o => sinAsignar.push(o));
 
   return { routes, sinAsignar };
 }
