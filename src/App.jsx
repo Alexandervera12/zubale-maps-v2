@@ -73,7 +73,7 @@ function distKm(a,b) {
   return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
 }
 
-// Diámetro del grupo = distancia máxima entre cualquier par de puntos
+// Diámetro = distancia máxima entre cualquier par del grupo
 function groupDiameter(group) {
   let max = 0;
   for (let i = 0; i < group.length; i++)
@@ -82,84 +82,78 @@ function groupDiameter(group) {
   return max;
 }
 
-// Encuentra el mejor grupo de batchSize puntos:
-// - El diámetro del grupo (distancia máxima entre cualquier par) <= maxDistKm
-// - Se minimiza el diámetro total del grupo
-// Busca entre los candidatos más cercanos al seed
-function findBestGroup(seed, pool, batchSize, maxDistKm) {
-  const need = batchSize - 1;
-  if (pool.length < need) return null;
+// Encuentra el grupo MÁS COMPACTO de batchSize puntos en TODO el pool
+// Sin preferencia por norte/sur — busca el grupo con menor diámetro global
+function findMostCompactGroup(pool, batchSize, maxDistKm) {
+  if (pool.length < batchSize) return null;
 
-  // Ordenar por distancia al seed y tomar ventana de búsqueda
-  const candidates = [...pool]
-    .sort((a, b) => distKm(seed, a) - distKm(seed, b))
-    .slice(0, Math.min(need * 5 + 5, pool.length));
-
+  // Para cada punto como seed, buscar sus (batchSize-1) vecinos más cercanos
+  // y evaluar el diámetro del grupo resultante
   let bestGrp = null, bestDiam = Infinity;
 
-  // Combinaciones de `need` candidatos
-  function combine(start, current) {
-    if (current.length === need) {
-      const grp = [seed, ...current];
-      const diam = groupDiameter(grp);
-      if (diam <= maxDistKm && diam < bestDiam) {
-        bestDiam = diam;
-        bestGrp = [...grp];
+  for (let si = 0; si < pool.length; si++) {
+    const seed = pool[si];
+    // Vecinos más cercanos al seed (ventana de búsqueda limitada para performance)
+    const neighbors = pool
+      .filter((_, i) => i !== si)
+      .sort((a, b) => distKm(seed, a) - distKm(seed, b))
+      .slice(0, Math.min((batchSize - 1) * 4, pool.length - 1));
+
+    const need = batchSize - 1;
+
+    // Probar combinaciones de vecinos
+    function combine(start, current) {
+      if (current.length === need) {
+        const grp = [seed, ...current];
+        const diam = groupDiameter(grp);
+        if (diam <= maxDistKm && diam < bestDiam) {
+          bestDiam = diam;
+          bestGrp = [...grp];
+        }
+        return;
       }
-      return;
+      if (neighbors.length - start < need - current.length) return;
+      for (let i = start; i < neighbors.length; i++) {
+        combine(i + 1, [...current, neighbors[i]]);
+      }
     }
-    // Poda: si ya no hay suficientes candidatos restantes, salir
-    if (candidates.length - start < need - current.length) return;
-    for (let i = start; i < candidates.length; i++) {
-      combine(i + 1, [...current, candidates[i]]);
-    }
+    combine(0, []);
   }
-  combine(0, []);
+
   return bestGrp;
 }
 
-// Generar rutas: solo rutas COMPLETAS de exactamente batchSize
-// donde el diámetro del grupo <= maxDistKm
-// Los sobrantes van a sinAsignar sin marcarse como ruteados
+// Generar rutas: busca siempre el grupo MÁS COMPACTO disponible
+// Solo rutas COMPLETAS — sobrantes van a sinAsignar (no se marcan como ruteados)
 function generateRoutes(orders, batchSize, maxDistKm) {
   if (orders.length === 0) return { routes: [], sinAsignar: [] };
 
-  const pool = [...orders].sort((a, b) => b.lat - a.lat); // norte a sur
+  const pool = [...orders];
   const routes = [];
-  const sinAsignar = [];
   let colorIdx = 0;
 
   while (pool.length >= batchSize) {
-    const seed = pool[0];
-    const rest = pool.slice(1);
-    const grp = findBestGroup(seed, rest, batchSize, maxDistKm);
+    const grp = findMostCompactGroup(pool, batchSize, maxDistKm);
+    if (!grp) break; // ningún grupo válido dentro del maxDistKm
 
-    if (grp) {
-      // Remover del pool los puntos del grupo
-      grp.forEach(o => {
-        const idx = pool.findIndex(p => p.id === o.id);
-        if (idx !== -1) pool.splice(idx, 1);
-      });
-      routes.push({
-        id: `R${routes.length+1}`,
-        label: `Ruta ${routes.length+1}`,
-        color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
-        orders: grp,
-        hidden: false,
-        routeNum: routes.length+1,
-      });
-      colorIdx++;
-    } else {
-      // No encontró grupo válido para este seed — va a sinAsignar
-      pool.shift();
-      sinAsignar.push(seed);
-    }
+    // Remover del pool
+    grp.forEach(o => {
+      const idx = pool.findIndex(p => p.id === o.id);
+      if (idx !== -1) pool.splice(idx, 1);
+    });
+
+    routes.push({
+      id: `R${routes.length+1}`,
+      label: `Ruta ${routes.length+1}`,
+      color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
+      orders: grp,
+      hidden: false,
+      routeNum: routes.length+1,
+    });
+    colorIdx++;
   }
 
-  // Sobrantes finales
-  pool.forEach(o => sinAsignar.push(o));
-
-  return { routes, sinAsignar };
+  return { routes, sinAsignar: pool };
 }
 
 function convexHull(points) {
