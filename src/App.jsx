@@ -908,20 +908,46 @@ export default function App() {
             const cLat=z.points.reduce((s,p)=>s+p.lat,0)/z.points.length;
             const cLng=z.points.reduce((s,p)=>s+p.lng,0)/z.points.length;
             const isAct=activeOrgZone===z.id;
-            const cnt=ordersInZone(z).filter(d=>orgFilter==="all"||d.window===orgFilter).length;
             return(
               <React.Fragment key={z.id}>
-                <Polygon paths={z.points} options={{fillColor:z.color,fillOpacity:isAct?0.22:0.1,strokeColor:z.color,strokeOpacity:isAct?1:0.6,strokeWeight:isAct?2.5:1.5}}
-                  onClick={()=>mode==="orgZonas"&&setActiveOrgZone(isAct?null:z.id)}/>
-                <Marker position={{lat:cLat,lng:cLng}}
-                  onClick={()=>mode==="orgZonas"&&setActiveOrgZone(isAct?null:z.id)}
-                  icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="80" height="28" viewBox="0 0 80 28"><rect x="0" y="0" width="80" height="28" rx="6" fill="${z.color}" opacity="0.92"/><text x="40" y="18" text-anchor="middle" font-size="11" font-weight="600" fill="white" font-family="sans-serif">${z.name} · ${cnt}</text></svg>`)}`,scaledSize:{width:80,height:28},anchor:{x:40,y:14}}}/>
+                <Polygon
+                  paths={z.points}
+                  options={{fillColor:z.color,fillOpacity:isAct?0.25:0.12,strokeColor:z.color,strokeOpacity:isAct?1:0.7,strokeWeight:isAct?3:2}}
+                  onClick={()=>setActiveOrgZone(isAct?null:z.id)}
+                />
+                <Marker
+                  position={{lat:cLat,lng:cLng}}
+                  onClick={()=>setActiveOrgZone(isAct?null:z.id)}
+                  label={{text:z.name,color:"#ffffff",fontWeight:"600",fontSize:"12px"}}
+                  icon={{
+                    path:"M -40,-14 L 40,-14 Q 44,-14 44,-10 L 44,10 Q 44,14 40,14 L -40,14 Q -44,14 -44,10 L -44,-10 Q -44,-14 -40,-14 Z",
+                    fillColor:z.color,
+                    fillOpacity:0.92,
+                    strokeColor:"rgba(255,255,255,0.3)",
+                    strokeWeight:1,
+                    scale:1,
+                    anchor:{x:0,y:0},
+                    labelOrigin:{x:0,y:0},
+                  }}
+                />
               </React.Fragment>
             );
           })}
-          {drawingOrg&&orgPoints.length>=2&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.15,strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2}}/>}
-          {drawingOrg&&orgPoints.length>=2&&<Polyline path={[...orgPoints,orgPoints[0]]} options={{strokeColor:"#22c55e",strokeOpacity:0.6,strokeWeight:1.5,strokeDasharray:"5 5"}}/>}
-          {drawingOrg&&orgPoints.map((p,i)=><Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#22c55e" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>)}
+          {drawingOrg&&orgPoints.length>=3&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.15,strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2.5}}/>}
+          {drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2.5}}/>}
+          {drawingOrg&&orgPoints.map((p,i)=>(
+            <Marker key={i} position={p}
+              label={{text:String(i+1),color:"#ffffff",fontWeight:"700",fontSize:"11px"}}
+              icon={{
+                path:google.maps.SymbolPath.CIRCLE,
+                scale:10,
+                fillColor:"#22c55e",
+                fillOpacity:1,
+                strokeColor:"#ffffff",
+                strokeWeight:2,
+              }}
+            />
+          ))}
 
           {/* Org zones modal */}
           {showOrgModal&&(
