@@ -109,13 +109,19 @@ function greedyRoutes(orders, batchSize, maxDistKm) {
   return {routes,sinAsignar:pool};
 }
 
-// PASO 2: Swap optimization — intercambia puntos entre rutas si mejora diámetro total
+// PASO 2: Recocido simulado (Simulated Annealing)
+// Acepta swaps que empeoran levemente para escapar mínimos locales
+// Encuentra soluciones que el swap greedy no puede ver
 function optimizeSwaps(routes, maxDistKm) {
   if(routes.length<2)return routes;
+  
+  function totalCost(rs){return rs.reduce((s,r)=>s+groupDiameter(r.orders),0);}
+  
+  // Primero hacer swap greedy determinístico
   const rs=routes.map(r=>({...r,orders:[...r.orders]}));
-  let improved=true,iter=0;
-  while(improved&&iter<1000){
-    improved=false;iter++;
+  let improved=true;
+  while(improved){
+    improved=false;
     for(let ri=0;ri<rs.length;ri++){
       for(let rj=ri+1;rj<rs.length;rj++){
         for(let pi=0;pi<rs[ri].orders.length;pi++){
@@ -130,7 +136,35 @@ function optimizeSwaps(routes, maxDistKm) {
       }
     }
   }
-  return rs;
+  
+  // Luego recocido simulado para escapar mínimos locales
+  let current=rs.map(r=>({...r,orders:[...r.orders]}));
+  let best=current.map(r=>({...r,orders:[...r.orders]}));
+  let bestCost=totalCost(best);
+  let temp=2.0;
+  const cooling=0.993;
+  const iterations=Math.min(3000, routes.length*routes[0].orders.length*200);
+  
+  for(let iter=0;iter<iterations;iter++){
+    temp*=cooling;
+    const ri=Math.floor(Math.random()*current.length);
+    let rj=Math.floor(Math.random()*current.length);
+    while(rj===ri)rj=Math.floor(Math.random()*current.length);
+    const pi=Math.floor(Math.random()*current[ri].orders.length);
+    const pj=Math.floor(Math.random()*current[rj].orders.length);
+    const costBefore=groupDiameter(current[ri].orders)+groupDiameter(current[rj].orders);
+    const tmp=current[ri].orders[pi];current[ri].orders[pi]=current[rj].orders[pj];current[rj].orders[pj]=tmp;
+    const d1=groupDiameter(current[ri].orders),d2=groupDiameter(current[rj].orders);
+    const delta=(d1+d2)-costBefore;
+    const accept=delta<0||(Math.random()<Math.exp(-delta/temp));
+    if(accept&&d1<=maxDistKm&&d2<=maxDistKm){
+      const newCost=totalCost(current);
+      if(newCost<bestCost){bestCost=newCost;best=current.map(r=>({...r,orders:[...r.orders]}));}
+    } else {
+      current[rj].orders[pj]=current[ri].orders[pi];current[ri].orders[pi]=tmp;
+    }
+  }
+  return best;
 }
 
 // PASO 3: Intentar absorber pendientes en rutas existentes via swap
