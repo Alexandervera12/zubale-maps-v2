@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { GoogleMap, useJsApiLoader, Marker, InfoWindow, Polygon, Polyline } from "@react-google-maps/api";
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "firebase/firestore";
+import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection, writeBatch } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCdY8bdceRG1XMhdomKZ2cpC_4a8ORrt_Q",
@@ -95,7 +95,13 @@ function greedyRoutes(orders, batchSize, maxDistKm) {
       const neighbors = pool.filter((_,i)=>i!==si).sort((a,b)=>distKm(seed,a)-distKm(seed,b)).slice(0,Math.min((batchSize-1)*4,pool.length-1));
       const need = batchSize-1;
       function combine(start,current) {
-        if(current.length===need){const grp=[seed,...current];const diam=groupDiameter(grp);if(diam<=maxDistKm&&diam<bestDiam){bestDiam=diam;bestGrp=[...grp];}return;}
+        if(current.length===need){
+          const grp=[seed,...current];
+          const diam=groupDiameter(grp);
+          const cost=groupDiameter(grp);
+          if(diam<=maxDistKm&&cost<bestDiam){bestDiam=cost;bestGrp=[...grp];}
+          return;
+        }
         if(neighbors.length-start<need-current.length)return;
         for(let i=start;i<neighbors.length;i++)combine(i+1,[...current,neighbors[i]]);
       }
@@ -129,7 +135,7 @@ function optimizeSwaps(routes, maxDistKm) {
             const dBefore=groupDiameter(rs[ri].orders)+groupDiameter(rs[rj].orders);
             const tmp=rs[ri].orders[pi];rs[ri].orders[pi]=rs[rj].orders[pj];rs[rj].orders[pj]=tmp;
             const d1=groupDiameter(rs[ri].orders),d2=groupDiameter(rs[rj].orders);
-            if(d1+d2<dBefore&&d1<=maxDistKm&&d2<=maxDistKm){improved=true;}
+            if(groupDiameter(rs[ri].orders)+groupDiameter(rs[rj].orders)<dBefore&&d1<=maxDistKm&&d2<=maxDistKm){improved=true;}
             else{rs[rj].orders[pj]=rs[ri].orders[pi];rs[ri].orders[pi]=tmp;}
           }
         }
@@ -155,7 +161,7 @@ function optimizeSwaps(routes, maxDistKm) {
     const costBefore=groupDiameter(current[ri].orders)+groupDiameter(current[rj].orders);
     const tmp=current[ri].orders[pi];current[ri].orders[pi]=current[rj].orders[pj];current[rj].orders[pj]=tmp;
     const d1=groupDiameter(current[ri].orders),d2=groupDiameter(current[rj].orders);
-    const delta=(d1+d2)-costBefore;
+    const delta=(groupDiameter(current[ri].orders)+groupDiameter(current[rj].orders))-costBefore;
     const accept=delta<0||(Math.random()<Math.exp(-delta/temp));
     if(accept&&d1<=maxDistKm&&d2<=maxDistKm){
       const newCost=totalCost(current);
@@ -181,7 +187,7 @@ function absorbPending(routes, sinAsignar, maxDistKm) {
         const testOrders=[...rs[ri].orders];testOrders[oi]=pending;
         const dAfter=groupDiameter(testOrders);
         const improvement=dBefore-dAfter;
-        if(dAfter<=maxDistKm&&improvement>bestImprovement){bestImprovement=improvement;bestRi=ri;bestOi=oi;}
+        if(groupDiameter(testOrders)<=maxDistKm&&improvement>bestImprovement){bestImprovement=improvement;bestRi=ri;bestOi=oi;}
       }
     }
     if(bestRi!==-1){
@@ -313,6 +319,24 @@ export default function App() {
     return onSnapshot(collection(db,"exclusion_zones"),s=>{const zs=[];s.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
   },[]);
 
+  // Firebase: escuchar rutas del día en tiempo real
+  useEffect(()=>{
+    const key=getRoutedKey();
+    const colRef=collection(db,"shared_routes",key,"routes");
+    return onSnapshot(colRef,s=>{
+      if(s.empty) return;
+      const loaded=[];
+      s.forEach(d=>loaded.push({id:d.id,...d.data()}));
+      // Solo actualizar si no somos nosotros quienes generamos (evitar loop)
+      loaded.sort((a,b)=>a.routeNum-b.routeNum);
+      setRoutes(prev=>{
+        // Si ya tenemos rutas locales iguales no sobreescribir
+        if(prev.length===loaded.length&&prev.every((r,i)=>r.id===loaded[i].id&&r.orders.length===loaded[i].orders.length)) return prev;
+        return loaded;
+      });
+    });
+  },[]);
+
   async function toggleTaken(id){
     const r=doc(db,"taken",getTodayKey(),"orders",id);
     if(takenIds.has(id))await deleteDoc(r);
@@ -322,6 +346,33 @@ export default function App() {
   async function markAsRouted(orders){
     const key=getRoutedKey();
     await Promise.all(orders.map(o=>setDoc(doc(db,"routed",key,"orders",o.id),{routedAt:new Date().toISOString()})));
+  }
+
+  // Guardar rutas en Firebase para que todos las vean
+  async function saveRoutesToFirebase(routes) {
+    const key = getRoutedKey();
+    const batch = writeBatch(db);
+    routes.forEach(r => {
+      const ref = doc(db, "shared_routes", key, "routes", r.id);
+      batch.set(ref, {
+        id: r.id,
+        label: r.label,
+        color: r.color,
+        routeNum: r.routeNum,
+        hidden: r.hidden,
+        window: selectedWindow,
+        orders: r.orders,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+    await batch.commit();
+  }
+
+  // Borrar rutas compartidas (al reordenar)
+  async function clearSharedRoutes() {
+    const key = getRoutedKey();
+    const snap = await collection(db, "shared_routes", key, "routes");
+    // Se sobreescriben al guardar nuevas, no hace falta borrar
   }
 
   useEffect(()=>{setSelected(null);setActiveRoute(null);},[mode]);
@@ -342,6 +393,8 @@ export default function App() {
     setExcludedOrders(excl);
     setActiveRoute(null);
     setGenerating(false);
+    // Guardar rutas en Firebase para que todos las vean
+    if(r.length>0) saveRoutesToFirebase(r);
     if(mapRef.current&&toRoute.length>0){mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});mapRef.current.setZoom(12);}
   }
 
@@ -356,8 +409,9 @@ export default function App() {
       if(idx===-1) return prev;
       const [order] = fromR.orders.splice(idx,1);
       toR.orders.push(order);
-      // Limpiar rutas vacías
-      return rs.filter(r=>r.orders.length>0);
+      const updated = rs.filter(r=>r.orders.length>0);
+      saveRoutesToFirebase(updated);
+      return updated;
     });
     setSelected(null);
     setReassigning(null);
@@ -366,7 +420,11 @@ export default function App() {
   // Mover un pedido de sinAsignar a una ruta
   function assignToRoute(orderId, toRouteId) {
     setSinAsignar(prev => prev.filter(o=>o.id!==orderId));
-    setRoutes(prev => prev.map(r => r.id===toRouteId ? {...r, orders:[...r.orders, sinAsignar.find(o=>o.id===orderId)].filter(Boolean)} : r));
+    setRoutes(prev => {
+      const updated = prev.map(r => r.id===toRouteId ? {...r, orders:[...r.orders, sinAsignar.find(o=>o.id===orderId)].filter(Boolean)} : r);
+      saveRoutesToFirebase(updated);
+      return updated;
+    });
     setSelected(null);
     setReassigning(null);
   }
@@ -416,6 +474,7 @@ export default function App() {
         <div style={{display:"flex",alignItems:"center",gap:8,marginRight:16}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:"#22d3ee"}}/>
           <span style={{fontSize:15,fontWeight:600,color:textPri}}>Zubale Maps</span>
+          <span style={{fontSize:11,padding:"1px 7px",borderRadius:10,background:"#1e0535",color:"#d8b4fe",fontWeight:600}}>V2</span>
         </div>
         {["mapa","ruteo",...(mode==="zonas"?["zonas"]:[])].map(m=>(
           <button key={m} onClick={()=>{setMode(m);if(m!=="zonas")cancelDrawing();}} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,background:mode===m?(dark?"#1e2436":"#f1f5f9"):"transparent",color:mode===m?textPri:textMut,borderBottom:mode===m?"2px solid #3b82f6":"2px solid transparent"}}>
@@ -477,7 +536,7 @@ export default function App() {
 
           {mode==="ruteo"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Ventana de entrega</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
                 {VENTANAS.filter(v=>windowCounts[v]>0).map(v=>(
                   <button key={v} onClick={()=>{setSelectedWindow(v);setRoutes([]);setActiveRoute(null);setSinAsignar([]);setExcludedOrders([]);}} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer"}}>
@@ -487,7 +546,7 @@ export default function App() {
               </div>
             </div>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Pedidos por ruta</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 2 — Pedidos por ruta</p>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
                 <button onClick={()=>setBatchSize(b=>Math.max(2,b-1))} style={{width:30,height:30,borderRadius:6,background:inputBg,border:`1px solid ${inputBdr}`,color:textMut,fontSize:18,cursor:"pointer"}}>−</button>
                 <span style={{fontSize:24,fontWeight:600,color:textPri,minWidth:32,textAlign:"center"}}>{batchSize}</span>
@@ -528,7 +587,8 @@ export default function App() {
                         <div onClick={()=>setActiveRoute(activeRoute===r.id?null:r.id)} style={{display:"flex",alignItems:"center",gap:7,flex:1,cursor:"pointer"}}>
                           <div style={{width:22,height:22,borderRadius:"50%",background:r.hidden?"#475569":r.color,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#fff"}}>{r.routeNum}</div>
                           <span style={{fontSize:12,fontWeight:600,color:r.hidden?textMut:textPri}}>{r.label}</span>
-                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:r.color+"25",color:r.color}}>{r.orders.length} pedidos</span>
+                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:r.color+"25",color:r.color}}>{r.orders.length} stops</span>
+
                         </div>
                         <div onClick={()=>toggleHideRoute(r.id)} style={{width:36,height:20,borderRadius:10,cursor:"pointer",position:"relative",flexShrink:0,background:r.hidden?(dark?"#2a3044":"#cbd5e1"):r.color+"99"}}>
                           <div style={{width:14,height:14,borderRadius:"50%",background:"#fff",position:"absolute",top:3,transition:"left 0.2s",left:r.hidden?3:19}}/>
