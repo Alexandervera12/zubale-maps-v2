@@ -361,7 +361,6 @@ export default function App() {
         <div style={{display:"flex",alignItems:"center",gap:8,marginRight:16}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:"#22d3ee"}}/>
           <span style={{fontSize:15,fontWeight:600,color:textPri}}>Zubale Maps</span>
-          <span style={{fontSize:11,padding:"1px 7px",borderRadius:10,background:"#1e0535",color:"#d8b4fe",fontWeight:600}}>V2</span>
         </div>
         {["mapa","ruteo",...(mode==="zonas"?["zonas"]:[])].map(m=>(
           <button key={m} onClick={()=>{setMode(m);if(m!=="zonas")cancelDrawing();}} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,background:mode===m?(dark?"#1e2436":"#f1f5f9"):"transparent",color:mode===m?textPri:textMut,borderBottom:mode===m?"2px solid #3b82f6":"2px solid transparent"}}>
@@ -438,7 +437,7 @@ export default function App() {
 
           {mode==="ruteo"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Ventana de entrega</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
                 {VENTANAS.filter(v=>windowCounts[v]>0).map(v=>(
                   <button key={v} onClick={()=>{setSelectedWindow(v);setRoutes([]);setActiveRoute(null);setSinAsignar([]);setExcludedOrders([]);}} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer"}}>
@@ -448,7 +447,7 @@ export default function App() {
               </div>
             </div>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 2 — Pedidos por ruta</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Pedidos por ruta</p>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
                 <button onClick={()=>setBatchSize(b=>Math.max(2,b-1))} style={{width:30,height:30,borderRadius:6,background:inputBg,border:`1px solid ${inputBdr}`,color:textMut,fontSize:18,cursor:"pointer"}}>−</button>
                 <span style={{fontSize:24,fontWeight:600,color:textPri,minWidth:32,textAlign:"center"}}>{batchSize}</span>
@@ -604,7 +603,7 @@ export default function App() {
                 options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
 
                 {zones.map(z=>(
-                  <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.6,strokeWeight:1.5}}/>
+                  <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.3,strokeWeight:1}}/>
                 ))}
                 {drawing&&currentPoints.length>=2&&<Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>}
                 {drawing&&currentPoints.map((p,i)=>(
