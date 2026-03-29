@@ -541,7 +541,6 @@ export default function App() {
         <div style={{display:"flex",alignItems:"center",gap:8,marginRight:16}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:"#22d3ee"}}/>
           <span style={{fontSize:15,fontWeight:600,color:textPri}}>Zubale Maps</span>
-          <span style={{fontSize:11,padding:"1px 7px",borderRadius:10,background:"#1e0535",color:"#d8b4fe",fontWeight:600}}>V2</span>
         </div>
         {["mapa","ruteo","orgZonas",...(mode==="zonas"?["zonas"]:[])].map(m=>(
           <button key={m} onClick={()=>{setMode(m);if(m!=="zonas")cancelDrawing();}} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,background:mode===m?(dark?"#1e2436":"#f1f5f9"):"transparent",color:mode===m?textPri:textMut,borderBottom:mode===m?"2px solid #3b82f6":"2px solid transparent"}}>
@@ -571,7 +570,7 @@ export default function App() {
               </div>
             </div>
             <div style={{padding:"10px 14px",borderBottom:`1px solid ${border}`}}>
-              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por ID o dirección..." style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por SG" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/>
             </div>
             <div style={{padding:"10px 14px",borderBottom:`1px solid ${border}`}}>
               <p style={{fontSize:11,color:textMut,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.06em"}}>Ventana de entrega</p>
@@ -581,7 +580,7 @@ export default function App() {
               </select>
             </div>
             <div style={{padding:"10px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Leyenda — clic para filtrar</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Clic para filtrar</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"3px 6px"}}>
                 {VENTANAS.map(v=>(
                   <div key={v} onClick={()=>setFilter(filter===v?"all":v)} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",padding:"4px 7px",borderRadius:6,background:filter===v?VENTANA_PALETTE[v]+"22":"transparent",border:`1px solid ${filter===v?VENTANA_PALETTE[v]+"66":"transparent"}`}}>
@@ -609,7 +608,7 @@ export default function App() {
 
           {mode==="ruteo"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Ventana de entrega</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
                 {VENTANAS.filter(v=>windowCounts[v]>0).map(v=>(
                   <button key={v} onClick={()=>setSelectedWindow(v)} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer",position:"relative"}}>
@@ -619,7 +618,7 @@ export default function App() {
               </div>
             </div>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 2 — Pedidos por ruta</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Pedidos por ruta</p>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
                 <button onClick={()=>setBatchSize(b=>Math.max(2,b-1))} style={{width:30,height:30,borderRadius:6,background:inputBg,border:`1px solid ${inputBdr}`,color:textMut,fontSize:18,cursor:"pointer"}}>−</button>
                 <span style={{fontSize:24,fontWeight:600,color:textPri,minWidth:32,textAlign:"center"}}>{batchSize}</span>
@@ -714,9 +713,9 @@ export default function App() {
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                 <div style={{width:8,height:8,borderRadius:"50%",background:"#22c55e"}}/>
-                <p style={{fontSize:13,fontWeight:600,color:textPri}}>Zonas de organización</p>
+                <p style={{fontSize:13,fontWeight:600,color:textPri}}>Zonas</p>
               </div>
-              <p style={{fontSize:12,color:textMut,marginBottom:10,lineHeight:1.5}}>Agrupa pedidos por zona geográfica. Doble X para dibujar.</p>
+              <p style={{fontSize:12,color:textMut,marginBottom:10,lineHeight:1.5}}>Agrupa pedidos por zonas</p>
               {/* Filtro ventana */}
               <select value={orgFilter} onChange={e=>setOrgFilter(e.target.value)} style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"7px 10px",borderRadius:8,outline:"none",cursor:"pointer",boxSizing:"border-box",marginBottom:8}}>
                 <option value="all">Todas las ventanas</option>
