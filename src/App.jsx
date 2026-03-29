@@ -277,13 +277,34 @@ export default function App() {
   const [deletePassword,setDeletePassword] = useState("");
   const [deleteError,setDeleteError]   = useState("");
 
+  // Zonas de organización
+  const [orgZones,setOrgZones]             = useState([]);
+  const [drawingOrg,setDrawingOrg]         = useState(false);
+  const [orgPoints,setOrgPoints]           = useState([]);
+  const [showOrgModal,setShowOrgModal]     = useState(false);
+  const [orgZoneName,setOrgZoneName]       = useState("");
+  const [orgZoneColor,setOrgZoneColor]     = useState("#3b82f6");
+  const [orgPassword,setOrgPassword]       = useState("");
+  const [orgError,setOrgError]             = useState("");
+  const [activeOrgZone,setActiveOrgZone]   = useState(null);
+  const [orgFilter,setOrgFilter]           = useState("all");
+  const [deleteOrgConfirm,setDeleteOrgConfirm] = useState(null);
+  const [deleteOrgPassword,setDeleteOrgPassword] = useState("");
+  const [deleteOrgError,setDeleteOrgError] = useState("");
+
   const zKeyRef=useRef(0);
+  const xKeyRef=useRef(0);
   useEffect(()=>{
     const h=(e)=>{
       if(e.key==="z"||e.key==="Z"){
         const now=Date.now();
         if(now-zKeyRef.current<600) setMode("zonas");
         zKeyRef.current=now;
+      }
+      if(e.key==="x"||e.key==="X"){
+        const now=Date.now();
+        if(now-xKeyRef.current<600){setMode("orgZonas");setDrawingOrg(true);}
+        xKeyRef.current=now;
       }
     };
     window.addEventListener("keydown",h);
@@ -319,23 +340,19 @@ export default function App() {
     return onSnapshot(collection(db,"exclusion_zones"),s=>{const zs=[];s.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
   },[]);
 
-  // Firebase: escuchar rutas del día en tiempo real
+  // Firebase: escuchar rutas de la ventana seleccionada en tiempo real
   useEffect(()=>{
+    if(!selectedWindow) return;
     const key=getRoutedKey();
-    const colRef=collection(db,"shared_routes",key,"routes");
+    const colRef=collection(db,"shared_routes",key+"_"+selectedWindow,"routes");
     return onSnapshot(colRef,s=>{
-      if(s.empty) return;
       const loaded=[];
       s.forEach(d=>loaded.push({id:d.id,...d.data()}));
-      // Solo actualizar si no somos nosotros quienes generamos (evitar loop)
       loaded.sort((a,b)=>a.routeNum-b.routeNum);
-      setRoutes(prev=>{
-        // Si ya tenemos rutas locales iguales no sobreescribir
-        if(prev.length===loaded.length&&prev.every((r,i)=>r.id===loaded[i].id&&r.orders.length===loaded[i].orders.length)) return prev;
-        return loaded;
-      });
+      if(loaded.length>0) setRoutes(loaded);
+      else setRoutes([]);
     });
-  },[]);
+  },[selectedWindow]);
 
   async function toggleTaken(id){
     const r=doc(db,"taken",getTodayKey(),"orders",id);
@@ -348,20 +365,17 @@ export default function App() {
     await Promise.all(orders.map(o=>setDoc(doc(db,"routed",key,"orders",o.id),{routedAt:new Date().toISOString()})));
   }
 
-  // Guardar rutas en Firebase para que todos las vean
+  // Guardar rutas en Firebase (por ventana)
   async function saveRoutesToFirebase(routes) {
-    const key = getRoutedKey();
+    if(!selectedWindow) return;
+    const key = getRoutedKey()+"_"+selectedWindow;
     const batch = writeBatch(db);
     routes.forEach(r => {
       const ref = doc(db, "shared_routes", key, "routes", r.id);
       batch.set(ref, {
-        id: r.id,
-        label: r.label,
-        color: r.color,
-        routeNum: r.routeNum,
-        hidden: r.hidden,
-        window: selectedWindow,
-        orders: r.orders,
+        id: r.id, label: r.label, color: r.color,
+        routeNum: r.routeNum, hidden: r.hidden,
+        window: selectedWindow, orders: r.orders,
         updatedAt: new Date().toISOString(),
       });
     });
@@ -374,6 +388,14 @@ export default function App() {
     const snap = await collection(db, "shared_routes", key, "routes");
     // Se sobreescriben al guardar nuevas, no hace falta borrar
   }
+
+  // Firebase: zonas de organización (permanentes)
+  useEffect(()=>{
+    return onSnapshot(collection(db,"org_zones"),s=>{
+      const zs=[];s.forEach(d=>zs.push({id:d.id,...d.data()}));
+      setOrgZones(zs);
+    });
+  },[]);
 
   useEffect(()=>{setSelected(null);setActiveRoute(null);},[mode]);
 
@@ -431,6 +453,46 @@ export default function App() {
 
   function toggleHideRoute(id){setRoutes(prev=>prev.map(r=>r.id===id?{...r,hidden:!r.hidden}:r));}
 
+  // ── Org zones functions ─────────────────────────────────────────
+  function cancelOrgDrawing(){setDrawingOrg(false);setOrgPoints([]);setShowOrgModal(false);setOrgZoneName("");setOrgPassword("");setOrgError("");}
+
+  function handleOrgMapClick(e){
+    if(!drawingOrg)return;
+    setOrgPoints(prev=>[...prev,{lat:e.latLng.lat(),lng:e.latLng.lng()}]);
+  }
+
+  function closeOrgPolygon(){
+    if(orgPoints.length<3){alert("Mínimo 3 puntos");return;}
+    setShowOrgModal(true);
+  }
+
+  async function saveOrgZone(){
+    if(orgPassword!==ZONE_PASSWORD){setOrgError("Contraseña incorrecta");return;}
+    if(!orgZoneName.trim()){setOrgError("Escribe un nombre");return;}
+    const id=`orgzone_${Date.now()}`;
+    await setDoc(doc(db,"org_zones",id),{
+      name:orgZoneName.trim(), points:orgPoints,
+      color:orgZoneColor, createdAt:new Date().toISOString(),
+    });
+    cancelOrgDrawing();
+  }
+
+  async function deleteOrgZone(){
+    if(deleteOrgPassword!==ZONE_PASSWORD){setDeleteOrgError("Contraseña incorrecta");return;}
+    await deleteDoc(doc(db,"org_zones",deleteOrgConfirm));
+    setDeleteOrgConfirm(null);setDeleteOrgPassword("");setDeleteOrgError("");
+  }
+
+  // Pedidos dentro de una zona
+  function ordersInZone(zone){
+    return data.filter(d=>pointInPolygon({lat:d.lat,lng:d.lng},zone.points));
+  }
+
+  // Pedidos fuera de todas las zonas
+  function ordersOutsideAllZones(){
+    return data.filter(d=>!orgZones.some(z=>pointInPolygon({lat:d.lat,lng:d.lng},z.points)));
+  }
+
   async function saveZone(){
     if(zonePassword!==ZONE_PASSWORD){setZoneError("Contraseña incorrecta");return;}
     if(!zoneName.trim()){setZoneError("Escribe un nombre");return;}
@@ -476,9 +538,9 @@ export default function App() {
           <span style={{fontSize:15,fontWeight:600,color:textPri}}>Zubale Maps</span>
           <span style={{fontSize:11,padding:"1px 7px",borderRadius:10,background:"#1e0535",color:"#d8b4fe",fontWeight:600}}>V2</span>
         </div>
-        {["mapa","ruteo",...(mode==="zonas"?["zonas"]:[])].map(m=>(
+        {["mapa","ruteo","orgZonas",...(mode==="zonas"?["zonas"]:[])].map(m=>(
           <button key={m} onClick={()=>{setMode(m);if(m!=="zonas")cancelDrawing();}} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,background:mode===m?(dark?"#1e2436":"#f1f5f9"):"transparent",color:mode===m?textPri:textMut,borderBottom:mode===m?"2px solid #3b82f6":"2px solid transparent"}}>
-            {m==="mapa"?"Mapa":m==="ruteo"?"Ruteo":"Zonas"}
+            {m==="mapa"?"Mapa":m==="ruteo"?"Ruteo":m==="orgZonas"?"Zonas":"Excl."}
           </button>
         ))}
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
@@ -539,7 +601,7 @@ export default function App() {
               <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
                 {VENTANAS.filter(v=>windowCounts[v]>0).map(v=>(
-                  <button key={v} onClick={()=>{setSelectedWindow(v);setRoutes([]);setActiveRoute(null);setSinAsignar([]);setExcludedOrders([]);}} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer"}}>
+                  <button key={v} onClick={()=>setSelectedWindow(v)} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer",position:"relative"}}>
                     {v} <span style={{opacity:0.75,fontSize:10}}>({windowCounts[v]})</span>
                   </button>
                 ))}
@@ -637,6 +699,88 @@ export default function App() {
             </div>
           </>)}
 
+          {mode==="orgZonas"&&(<>
+            <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:"#22c55e"}}/>
+                <p style={{fontSize:13,fontWeight:600,color:textPri}}>Zonas de organización</p>
+              </div>
+              <p style={{fontSize:12,color:textMut,marginBottom:10,lineHeight:1.5}}>Agrupa pedidos por zona geográfica. Doble X para dibujar.</p>
+              {/* Filtro ventana */}
+              <select value={orgFilter} onChange={e=>setOrgFilter(e.target.value)} style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"7px 10px",borderRadius:8,outline:"none",cursor:"pointer",boxSizing:"border-box",marginBottom:8}}>
+                <option value="all">Todas las ventanas</option>
+                {VENTANAS.map(v=><option key={v} value={v}>{v}</option>)}
+              </select>
+              {drawingOrg&&(
+                <div>
+                  <div style={{fontSize:12,color:"#f59e0b",marginBottom:8,padding:"8px",background:dark?"#1c1206":"#fffbeb",borderRadius:6,lineHeight:1.5}}>
+                    Clic en el mapa para marcar puntos. Mínimo 3.<br/>
+                    <strong style={{color:"#f1f5f9"}}>{orgPoints.length} puntos</strong> marcados
+                  </div>
+                  <div style={{display:"flex",gap:6}}>
+                    <button onClick={closeOrgPolygon} disabled={orgPoints.length<3} style={{flex:1,padding:"7px",borderRadius:8,border:"none",cursor:orgPoints.length>=3?"pointer":"default",fontSize:12,fontWeight:500,color:"#fff",background:orgPoints.length>=3?"#22c55e":"#334155"}}>Guardar zona</button>
+                    <button onClick={cancelOrgDrawing} style={{flex:1,padding:"7px",borderRadius:8,border:`1px solid ${border}`,cursor:"pointer",fontSize:12,color:textMut,background:"transparent"}}>Cancelar</button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:8}}>
+              {orgZones.length===0&&!drawingOrg?(
+                <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px",lineHeight:1.6}}>
+                  No hay zonas. Presiona doble X para dibujar.
+                </div>
+              ):(
+                <>
+                  {orgZones.map(z=>{
+                    const allOrders=ordersInZone(z);
+                    const filtered=orgFilter==="all"?allOrders:allOrders.filter(d=>d.window===orgFilter);
+                    const isActive=activeOrgZone===z.id;
+                    return(
+                      <div key={z.id} style={{borderRadius:8,border:`1.5px solid ${isActive?z.color:border}`,marginBottom:6,overflow:"hidden",background:isActive?z.color+"12":"transparent"}}>
+                        <div style={{padding:"9px 12px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}} onClick={()=>setActiveOrgZone(isActive?null:z.id)}>
+                          <div style={{width:10,height:10,borderRadius:"50%",background:z.color,flexShrink:0}}/>
+                          <span style={{fontSize:13,fontWeight:600,color:textPri,flex:1}}>{z.name}</span>
+                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:z.color+"25",color:z.color,fontWeight:600}}>{filtered.length} pedidos</span>
+                          <button onClick={e=>{e.stopPropagation();setDeleteOrgConfirm(z.id);setDeleteOrgPassword("");setDeleteOrgError("");}} style={{fontSize:10,padding:"2px 7px",borderRadius:6,border:`1px solid #ef444444`,background:"#ef444411",color:"#ef4444",cursor:"pointer"}}>✕</button>
+                        </div>
+                        {isActive&&(
+                          <div style={{padding:"0 10px 10px",maxHeight:200,overflowY:"auto"}}>
+                            {filtered.length===0
+                              ?<p style={{fontSize:11,color:textMut}}>Sin pedidos {orgFilter!=="all"?`en ${orgFilter}`:""}</p>
+                              :filtered.map(d=>(
+                                <div key={d.id} onClick={()=>goTo(d)} style={{display:"flex",alignItems:"center",gap:6,padding:"3px 0",cursor:"pointer",fontSize:11,color:textMut}}>
+                                  <div style={{width:6,height:6,borderRadius:"50%",background:VENTANA_PALETTE[d.window]||"#64748b",flexShrink:0}}/>
+                                  <span style={{color:textPri,fontWeight:500}}>{d.id}</span>
+                                  <span style={{fontSize:10,padding:"1px 5px",borderRadius:6,background:VENTANA_PALETTE[d.window]+"22",color:VENTANA_PALETTE[d.window]}}>{d.window}</span>
+                                  <span style={{fontSize:10,color:textMut,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.address.split(",")[0]}</span>
+                                </div>
+                              ))
+                            }
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {/* Pedidos fuera de zonas */}
+                  {(()=>{
+                    const outside=ordersOutsideAllZones();
+                    const filtered=orgFilter==="all"?outside:outside.filter(d=>d.window===orgFilter);
+                    if(filtered.length===0) return null;
+                    return(
+                      <div style={{borderRadius:8,border:`1px solid ${dark?"#2a3044":"#cbd5e1"}`,marginTop:4,overflow:"hidden"}}>
+                        <div style={{padding:"9px 12px",display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{width:10,height:10,borderRadius:"50%",background:"#64748b",flexShrink:0}}/>
+                          <span style={{fontSize:12,fontWeight:600,color:textMut,flex:1}}>Sin zona asignada</span>
+                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:dark?"#1e2436":"#f1f5f9",color:textMut,fontWeight:600}}>{filtered.length}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+            </div>
+          </>)}
+
           {mode==="zonas"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
@@ -678,7 +822,7 @@ export default function App() {
         <div style={{flex:1,position:"relative"}}>
           {!isLoaded?<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"#475569"}}>Cargando mapa...</div>:(
             <GoogleMap mapContainerStyle={{width:"100%",height:"100%"}} center={MAP_CENTER} zoom={11} onLoad={onLoad}
-              onClick={mode==="zonas"&&drawing?handleMapClick:undefined}
+              onClick={mode==="zonas"&&drawing?handleMapClick:mode==="orgZonas"&&drawingOrg?handleOrgMapClick:undefined}
               options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
 
               {zones.map(z=><Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.6,strokeWeight:1.5}}/>)}
@@ -743,6 +887,58 @@ export default function App() {
                 </InfoWindow>
               )}
             </GoogleMap>
+          )}
+
+          {/* Org zones on map - always visible */}
+          {orgZones.map(z=>(
+            <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:activeOrgZone===z.id?0.2:0.08,strokeColor:z.color,strokeOpacity:activeOrgZone===z.id?0.9:0.5,strokeWeight:activeOrgZone===z.id?2:1.5}}
+              onClick={()=>mode==="orgZonas"&&setActiveOrgZone(activeOrgZone===z.id?null:z.id)}/>
+          ))}
+          {drawingOrg&&orgPoints.length>=2&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.1,strokeColor:"#22c55e",strokeOpacity:0.8,strokeWeight:2}}/>}
+          {drawingOrg&&orgPoints.map((p,i)=><Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#22c55e" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>)}
+
+          {/* Org zones modal */}
+          {showOrgModal&&(
+            <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}>
+              <div style={{background:dark?"#151820":"#fff",borderRadius:12,padding:24,width:320,border:`1px solid ${border}`}}>
+                <p style={{fontSize:15,fontWeight:600,color:textPri,marginBottom:16}}>Guardar zona de organización</p>
+                <div style={{marginBottom:12}}>
+                  <p style={{fontSize:12,color:textMut,marginBottom:6}}>Nombre de la zona</p>
+                  <input value={orgZoneName} onChange={e=>setOrgZoneName(e.target.value)} placeholder="Ej: Zona Norte" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+                <div style={{marginBottom:12}}>
+                  <p style={{fontSize:12,color:textMut,marginBottom:6}}>Color de la zona</p>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    {["#3b82f6","#22c55e","#f97316","#a855f7","#ef4444","#14b8a6","#f59e0b","#ec4899"].map(c=>(
+                      <div key={c} onClick={()=>setOrgZoneColor(c)} style={{width:24,height:24,borderRadius:"50%",background:c,cursor:"pointer",border:orgZoneColor===c?"3px solid #fff":"2px solid transparent",boxSizing:"border-box"}}/>
+                    ))}
+                  </div>
+                </div>
+                <div style={{marginBottom:16}}>
+                  <p style={{fontSize:12,color:textMut,marginBottom:6}}>Contraseña</p>
+                  <input type="password" value={orgPassword} onChange={e=>setOrgPassword(e.target.value)} placeholder="••••••••" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+                {orgError&&<p style={{fontSize:12,color:"#ef4444",marginBottom:12}}>{orgError}</p>}
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={saveOrgZone} style={{flex:1,padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#22c55e"}}>Guardar</button>
+                  <button onClick={cancelOrgDrawing} style={{flex:1,padding:"10px",borderRadius:8,border:`1px solid ${border}`,cursor:"pointer",fontSize:13,color:textMut,background:"transparent"}}>Cancelar</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {deleteOrgConfirm&&(
+            <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}>
+              <div style={{background:dark?"#151820":"#fff",borderRadius:12,padding:24,width:300,border:`1px solid ${border}`}}>
+                <p style={{fontSize:15,fontWeight:600,color:textPri,marginBottom:8}}>Borrar zona</p>
+                <p style={{fontSize:12,color:textMut,marginBottom:16}}>Esta acción es permanente.</p>
+                <input type="password" value={deleteOrgPassword} onChange={e=>setDeleteOrgPassword(e.target.value)} placeholder="Contraseña" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box",marginBottom:8}}/>
+                {deleteOrgError&&<p style={{fontSize:12,color:"#ef4444",marginBottom:8}}>{deleteOrgError}</p>}
+                <div style={{display:"flex",gap:8,marginTop:8}}>
+                  <button onClick={deleteOrgZone} style={{flex:1,padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#ef4444"}}>Borrar</button>
+                  <button onClick={()=>setDeleteOrgConfirm(null)} style={{flex:1,padding:"10px",borderRadius:8,border:`1px solid ${border}`,cursor:"pointer",fontSize:13,color:textMut,background:"transparent"}}>Cancelar</button>
+                </div>
+              </div>
+            </div>
           )}
 
           {showZoneModal&&(
