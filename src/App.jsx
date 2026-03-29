@@ -553,7 +553,7 @@ export default function App() {
         ))}
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
           {SHEETS_URL&&<span onClick={fetchSheets} style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:loading?"#2c1006":"#0c1d35",color:loading?"#fdba74":"#93c5fd",fontWeight:500,cursor:"pointer"}}>{loading?"⟳ Cargando...":lastSync?`⟳ ${lastSync}`:"⟳ Live"}</span>}
-          {sheetMeta&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>Actualización: {sheetMeta}</span>}
+          {lastSync&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>{sheetMeta?`Actualización Sheet: ${sheetMeta}`:`Sheet sync: ${lastSync}`}</span>}
           <button onClick={()=>setDarkMap(d=>!d)} style={{background:inputBg,border:`1px solid ${inputBdr}`,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:500,color:textMut}}>{dark?"☀ Claro":"☾ Oscuro"}</button>
         </div>
       </div>
@@ -912,43 +912,35 @@ export default function App() {
                   </div>
                 </InfoWindow>
               )}
+            {/* Org zones - inside GoogleMap */}
+            {orgZones.map(z=>{
+              const isAct=activeOrgZone===z.id;
+              return(
+                <React.Fragment key={z.id}>
+                  <Polygon
+                    paths={z.points}
+                    options={{
+                      fillColor:z.color,
+                      fillOpacity:isAct?0.35:0.2,
+                      strokeColor:z.color,
+                      strokeOpacity:1,
+                      strokeWeight:isAct?3:2,
+                    }}
+                    onClick={()=>setActiveOrgZone(isAct?null:z.id)}
+                  />
+                </React.Fragment>
+              );
+            })}
+            {drawingOrg&&orgPoints.length>=3&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.2,strokeColor:"#22c55e",strokeOpacity:1,strokeWeight:2.5}}/>}
+            {drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:1,strokeWeight:2.5}}/>}
+            {drawingOrg&&orgPoints.map((p,i)=>(
+              <Marker key={i} position={p}
+                label={{text:String(i+1),color:"#ffffff",fontWeight:"bold",fontSize:"11px"}}
+              />
+            ))}
+
             </GoogleMap>
           )}
-
-          {/* Org zones on map - always visible */}
-          {orgZones.map(z=>{
-            const cLat=z.points.reduce((s,p)=>s+p.lat,0)/z.points.length;
-            const cLng=z.points.reduce((s,p)=>s+p.lng,0)/z.points.length;
-            const isAct=activeOrgZone===z.id;
-            return(
-              <React.Fragment key={z.id}>
-                <Polygon
-                  paths={z.points}
-                  options={{fillColor:z.color,fillOpacity:isAct?0.28:0.14,strokeColor:z.color,strokeOpacity:isAct?1:0.75,strokeWeight:isAct?3:2}}
-                  onClick={()=>setActiveOrgZone(isAct?null:z.id)}
-                />
-                <Marker
-                  position={{lat:cLat,lng:cLng}}
-                  onClick={()=>setActiveOrgZone(isAct?null:z.id)}
-                  title={z.name}
-                  label={{text:z.name,color:z.color,fontWeight:"bold",fontSize:"13px",className:""}}
-                  icon={{
-                    path:"M 0,0",
-                    fillOpacity:0,
-                    strokeOpacity:0,
-                    scale:0,
-                  }}
-                />
-              </React.Fragment>
-            );
-          })}
-          {drawingOrg&&orgPoints.length>=3&&<Polygon paths={orgPoints} options={{fillColor:"#22c55e",fillOpacity:0.15,strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2.5}}/>}
-          {drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2.5}}/>}
-          {drawingOrg&&orgPoints.map((p,i)=>(
-            <Marker key={i} position={p}
-              label={{text:String(i+1),color:"#ffffff",fontWeight:"bold",fontSize:"11px"}}
-            />
-          ))}
 
           {/* Org zones modal */}
           {showOrgModal&&(
