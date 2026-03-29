@@ -722,11 +722,6 @@ export default function App() {
                 <option value="all">Todas las ventanas</option>
                 {VENTANAS.map(v=><option key={v} value={v}>{v}</option>)}
               </select>
-              {!drawingOrg&&(
-                <button onClick={()=>setDrawingOrg(true)} style={{width:"100%",padding:"9px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#22c55e",marginBottom:8}}>
-                  + Dibujar zona
-                </button>
-              )}
               {drawingOrg&&(
                 <div>
                   <div style={{fontSize:12,color:"#f59e0b",marginBottom:8,padding:"8px",background:dark?"#1c1206":"#fffbeb",borderRadius:6,lineHeight:1.5}}>
