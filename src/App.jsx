@@ -44,16 +44,10 @@ function makePinSvg(hex, taken=false) {
   };
 }
 function makeExcludedPin() {
-  return {
-    url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="#ef4444" opacity="0.5"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.8"/><text x="11" y="15" text-anchor="middle" font-size="10" font-weight="700" fill="#ef4444" font-family="sans-serif">✕</text></svg>`)}`,
-    scaledSize:{width:22,height:30},anchor:{x:11,y:30},
-  };
+  return { url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="#ef4444" opacity="0.5"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.8"/><text x="11" y="15" text-anchor="middle" font-size="10" font-weight="700" fill="#ef4444" font-family="sans-serif">✕</text></svg>`)}`,scaledSize:{width:22,height:30},anchor:{x:11,y:30}};
 }
 function makePendingPin() {
-  return {
-    url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="#94a3b8" opacity="0.7"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.8"/><text x="11" y="15" text-anchor="middle" font-size="10" font-weight="700" fill="#94a3b8" font-family="sans-serif">?</text></svg>`)}`,
-    scaledSize:{width:22,height:30},anchor:{x:11,y:30},
-  };
+  return { url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="30" viewBox="0 0 22 30"><path d="M11 0C4.93 0 0 4.93 0 11C0 19.25 11 30 11 30S22 19.25 22 11C22 4.93 17.07 0 11 0Z" fill="#94a3b8" opacity="0.7"/><circle cx="11" cy="11" r="4.5" fill="white" opacity="0.8"/><text x="11" y="15" text-anchor="middle" font-size="10" font-weight="700" fill="#94a3b8" font-family="sans-serif">?</text></svg>`)}`,scaledSize:{width:22,height:30},anchor:{x:11,y:30}};
 }
 
 const MAP_CENTER={lat:-33.47,lng:-70.64};
@@ -79,89 +73,99 @@ function distKm(a,b) {
   return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
 }
 
-// ── Clustering por densidad ───────────────────────────────────────
-// Agrupa puntos donde CADA par de puntos adyacentes está dentro de maxDistKm
-// Usa distancia entre puntos del cluster y el candidato (no centroide)
-function clusterByDensity(orders, maxDistKm) {
-  const n=orders.length;
-  const assigned=new Array(n).fill(-1);
-  const clusters=[];
+// Verifica que el nuevo punto está dentro de maxDistKm de TODOS los del grupo
+function isCompatible(newPoint, group, maxDistKm) {
+  return group.every(p => distKm(newPoint, p) <= maxDistKm);
+}
 
-  for(let i=0;i<n;i++) {
-    if(assigned[i]!==-1) continue;
-    const clusterIdx=clusters.length;
-    clusters.push([i]);
-    assigned[i]=clusterIdx;
+// Clustering estricto: un punto entra solo si está dentro de maxDistKm
+// de TODOS los puntos ya en el cluster
+function clusterStrict(orders, maxDistKm) {
+  const n = orders.length;
+  const assigned = new Array(n).fill(-1);
+  const clusters = [];
 
-    // BFS para expandir el cluster
-    const queue=[i];
-    while(queue.length>0) {
-      const curr=queue.shift();
-      for(let j=0;j<n;j++) {
-        if(assigned[j]!==-1) continue;
-        // Distancia directa entre el punto actual y el candidato
-        if(distKm(orders[curr],orders[j])<=maxDistKm) {
-          clusters[clusterIdx].push(j);
-          assigned[j]=clusterIdx;
-          queue.push(j);
+  for (let i = 0; i < n; i++) {
+    if (assigned[i] !== -1) continue;
+    const clusterIdx = clusters.length;
+    const cluster = [i];
+    clusters.push(cluster);
+    assigned[i] = clusterIdx;
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let j = 0; j < n; j++) {
+        if (assigned[j] !== -1) continue;
+        const clusterPts = cluster.map(idx => orders[idx]);
+        // Debe estar dentro de maxDistKm de TODOS los del cluster
+        if (clusterPts.every(p => distKm(orders[j], p) <= maxDistKm)) {
+          cluster.push(j);
+          assigned[j] = clusterIdx;
+          changed = true;
         }
       }
     }
   }
-  return clusters.map(idxs=>idxs.map(i=>orders[i]));
+  return clusters.map(idxs => idxs.map(i => orders[i]));
 }
 
-// ── Algoritmo principal ───────────────────────────────────────────
-// - Agrupa por densidad
-// - Dentro de cada cluster forma rutas completas de exactamente batchSize
-// - Los puntos que NO completan un batch → sinAsignar (NO se marcan como ruteados)
+// Generar rutas: solo rutas COMPLETAS de exactamente batchSize
+// Los sobrantes van a sinAsignar sin marcarse como ruteados
 function generateRoutes(orders, batchSize, maxDistKm) {
-  if(orders.length===0) return {routes:[],sinAsignar:[]};
+  if (orders.length === 0) return { routes: [], sinAsignar: [] };
 
-  const clusters=clusterByDensity(orders,maxDistKm);
-  const routes=[];
-  const sinAsignar=[];
-  let colorIdx=0;
+  const clusters = clusterStrict(orders, maxDistKm);
+  const routes = [];
+  const sinAsignar = [];
+  let colorIdx = 0;
 
-  clusters.forEach(cluster=>{
-    const pool=[...cluster];
+  clusters.forEach(cluster => {
+    const pool = [...cluster];
+    // Ordenar norte a sur para empezar desde arriba
+    pool.sort((a, b) => b.lat - a.lat);
 
-    // Ordenar pool por cercanía entre sí para mejor encadenamiento inicial
-    // Empezar desde el punto más al norte (lat mayor)
-    pool.sort((a,b)=>b.lat-a.lat);
+    while (pool.length >= batchSize) {
+      const seed = pool.shift();
+      const route = [seed];
 
-    while(pool.length>=batchSize) {
-      // Tomar el primer punto como semilla
-      const seed=pool.shift();
-      const route=[seed];
-
-      // Encadenar: siempre el más cercano al último punto añadido
-      while(route.length<batchSize&&pool.length>0) {
-        const last=route[route.length-1];
-        let bestIdx=0,bestDist=Infinity;
-        pool.forEach((o,i)=>{
-          const d=distKm(last,o);
-          if(d<bestDist){bestDist=d;bestIdx=i;}
+      while (route.length < batchSize && pool.length > 0) {
+        const last = route[route.length - 1];
+        // Buscar el más cercano al último que sea compatible con TODO el grupo
+        let bestIdx = -1, bestDist = Infinity;
+        pool.forEach((o, i) => {
+          const d = distKm(last, o);
+          if (d < bestDist && isCompatible(o, route, maxDistKm)) {
+            bestDist = d;
+            bestIdx = i;
+          }
         });
-        route.push(pool.splice(bestIdx,1)[0]);
+        if (bestIdx === -1) break;
+        route.push(pool.splice(bestIdx, 1)[0]);
       }
 
-      routes.push({
-        id:`R${routes.length+1}`,
-        label:`Ruta ${routes.length+1}`,
-        color:ROUTE_COLORS[colorIdx%ROUTE_COLORS.length],
-        orders:route,
-        hidden:false,
-        routeNum:routes.length+1,
-      });
-      colorIdx++;
+      if (route.length === batchSize) {
+        // Ruta completa ✓
+        routes.push({
+          id: `R${routes.length+1}`,
+          label: `Ruta ${routes.length+1}`,
+          color: ROUTE_COLORS[colorIdx % ROUTE_COLORS.length],
+          orders: route,
+          hidden: false,
+          routeNum: routes.length+1,
+        });
+        colorIdx++;
+      } else {
+        // No completó — devolver todo al sinAsignar
+        route.forEach(o => sinAsignar.push(o));
+      }
     }
 
-    // Sobrantes del cluster — NO forman ruta, quedan pendientes
-    pool.forEach(o=>sinAsignar.push(o));
+    // Sobrantes que no llegan al batch
+    pool.forEach(o => sinAsignar.push(o));
   });
 
-  return {routes,sinAsignar};
+  return { routes, sinAsignar };
 }
 
 function convexHull(points) {
@@ -177,10 +181,7 @@ function expandHull(points) {
   if(points.length<2) return points;
   const cLat=points.reduce((s,p)=>s+p.lat,0)/points.length;
   const cLng=points.reduce((s,p)=>s+p.lng,0)/points.length;
-  return points.map(p=>({
-    lat:cLat+(p.lat-cLat)*1.3+(p.lat>cLat?0.0008:-0.0008),
-    lng:cLng+(p.lng-cLng)*1.3+(p.lng>cLng?0.0008:-0.0008),
-  }));
+  return points.map(p=>({lat:cLat+(p.lat-cLat)*1.3+(p.lat>cLat?0.0008:-0.0008),lng:cLng+(p.lng-cLng)*1.3+(p.lng>cLng?0.0008:-0.0008)}));
 }
 function pointInPolygon(point,polygon) {
   let inside=false;
@@ -266,16 +267,13 @@ export default function App() {
 
   useEffect(()=>{fetchSheets();const iv=setInterval(fetchSheets,60000);return()=>clearInterval(iv);},[fetchSheets]);
   useEffect(()=>{
-    const c=collection(db,"taken",getTodayKey(),"orders");
-    return onSnapshot(c,s=>{const ids=new Set();s.forEach(d=>ids.add(d.id));setTakenIds(ids);});
+    return onSnapshot(collection(db,"taken",getTodayKey(),"orders"),s=>{const ids=new Set();s.forEach(d=>ids.add(d.id));setTakenIds(ids);});
   },[]);
   useEffect(()=>{
-    const c=collection(db,"routed",getRoutedKey(),"orders");
-    return onSnapshot(c,s=>{const ids=new Set();s.forEach(d=>ids.add(d.id));setRoutedIds(ids);});
+    return onSnapshot(collection(db,"routed",getRoutedKey(),"orders"),s=>{const ids=new Set();s.forEach(d=>ids.add(d.id));setRoutedIds(ids);});
   },[]);
   useEffect(()=>{
-    const c=collection(db,"exclusion_zones");
-    return onSnapshot(c,s=>{const zs=[];s.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
+    return onSnapshot(collection(db,"exclusion_zones"),s=>{const zs=[];s.forEach(d=>zs.push({id:d.id,...d.data()}));setZones(zs);});
   },[]);
 
   async function toggleTaken(id){
@@ -297,21 +295,14 @@ export default function App() {
     const excl=windowOrders.filter(o=>isExcluded(o,zones));
     const nonExcluded=windowOrders.filter(o=>!isExcluded(o,zones));
     const toRoute=includeAll?nonExcluded:nonExcluded.filter(o=>!routedIds.has(o.id));
-
     const {routes:r,sinAsignar:sa}=generateRoutes(toRoute,batchSize,maxDistKm);
-
-    // Solo marcar como ruteados los que SÍ tienen ruta completa
     const ruteados=r.flatMap(rt=>rt.orders);
     if(ruteados.length>0) markAsRouted(ruteados);
-
     setRoutes(r);
-    setSinAsignar(sa); // sin ruta por no completar batch — NO marcados
+    setSinAsignar(sa);
     setExcludedOrders(excl);
     setActiveRoute(null);
-    if(mapRef.current&&toRoute.length>0){
-      mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});
-      mapRef.current.setZoom(12);
-    }
+    if(mapRef.current&&toRoute.length>0){mapRef.current.panTo({lat:toRoute[0].lat,lng:toRoute[0].lng});mapRef.current.setZoom(12);}
   }
 
   function toggleHideRoute(id){setRoutes(prev=>prev.map(r=>r.id===id?{...r,hidden:!r.hidden}:r));}
@@ -337,9 +328,7 @@ export default function App() {
   const filtered=data.filter(d=>{
     const mf=filter==="all"||d.window===filter;
     const q=search.toLowerCase();
-    const ms=d.id.toLowerCase().includes(q)||d.address.toLowerCase().includes(q);
-    const mh=hideTaken?!takenIds.has(d.id):true;
-    return mf&&ms&&mh;
+    return mf&&(d.id.toLowerCase().includes(q)||d.address.toLowerCase().includes(q))&&(hideTaken?!takenIds.has(d.id):true);
   });
   const countByWindow=VENTANAS.reduce((acc,v)=>{acc[v]=filtered.filter(d=>d.window===v).length;return acc;},{});
   const takenCount=data.filter(d=>takenIds.has(d.id)).length;
@@ -361,6 +350,7 @@ export default function App() {
         <div style={{display:"flex",alignItems:"center",gap:8,marginRight:16}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:"#22d3ee"}}/>
           <span style={{fontSize:15,fontWeight:600,color:textPri}}>Zubale Maps</span>
+          <span style={{fontSize:11,padding:"1px 7px",borderRadius:10,background:"#1e0535",color:"#d8b4fe",fontWeight:600}}>V2</span>
         </div>
         {["mapa","ruteo",...(mode==="zonas"?["zonas"]:[])].map(m=>(
           <button key={m} onClick={()=>{setMode(m);if(m!=="zonas")cancelDrawing();}} style={{padding:"6px 16px",borderRadius:6,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,background:mode===m?(dark?"#1e2436":"#f1f5f9"):"transparent",color:mode===m?textPri:textMut,borderBottom:mode===m?"2px solid #3b82f6":"2px solid transparent"}}>
@@ -368,14 +358,8 @@ export default function App() {
           </button>
         ))}
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
-          {SHEETS_URL&&(
-            <span onClick={fetchSheets} style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:loading?"#2c1006":"#0c1d35",color:loading?"#fdba74":"#93c5fd",fontWeight:500,cursor:"pointer"}}>
-              {loading?"⟳ Cargando...":lastSync?`⟳ ${lastSync}`:"⟳ Live"}
-            </span>
-          )}
-          <button onClick={()=>setDarkMap(d=>!d)} style={{background:inputBg,border:`1px solid ${inputBdr}`,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:500,color:textMut}}>
-            {dark?"☀ Claro":"☾ Oscuro"}
-          </button>
+          {SHEETS_URL&&<span onClick={fetchSheets} style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:loading?"#2c1006":"#0c1d35",color:loading?"#fdba74":"#93c5fd",fontWeight:500,cursor:"pointer"}}>{loading?"⟳ Cargando...":lastSync?`⟳ ${lastSync}`:"⟳ Live"}</span>}
+          <button onClick={()=>setDarkMap(d=>!d)} style={{background:inputBg,border:`1px solid ${inputBdr}`,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:500,color:textMut}}>{dark?"☀ Claro":"☾ Oscuro"}</button>
         </div>
       </div>
 
@@ -384,11 +368,8 @@ export default function App() {
 
           {mode==="mapa"&&(<>
             <div style={{padding:"10px 14px",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-              <div>
-                <div style={{fontSize:12,fontWeight:500,color:textPri}}>Ocultar tomados</div>
-                <div style={{fontSize:11,color:textMut}}>{takenCount} de {data.length} tomados hoy</div>
-              </div>
-              <div onClick={()=>setHideTaken(h=>!h)} style={{width:44,height:24,borderRadius:12,cursor:"pointer",position:"relative",transition:"background 0.2s",background:hideTaken?"#3b82f6":(dark?"#2a3044":"#cbd5e1")}}>
+              <div><div style={{fontSize:12,fontWeight:500,color:textPri}}>Ocultar tomados</div><div style={{fontSize:11,color:textMut}}>{takenCount} de {data.length} tomados hoy</div></div>
+              <div onClick={()=>setHideTaken(h=>!h)} style={{width:44,height:24,borderRadius:12,cursor:"pointer",position:"relative",background:hideTaken?"#3b82f6":(dark?"#2a3044":"#cbd5e1")}}>
                 <div style={{width:18,height:18,borderRadius:"50%",background:"#fff",position:"absolute",top:3,transition:"left 0.2s",left:hideTaken?23:3}}/>
               </div>
             </div>
@@ -417,27 +398,21 @@ export default function App() {
             <div style={{flex:1,overflowY:"auto",padding:8}}>
               <div style={{padding:"4px 8px 8px",fontSize:11,color:textMut}}>Total: {filtered.length} registros</div>
               {filtered.length===0?<p style={{textAlign:"center",color:textMut,fontSize:13,padding:20}}>Sin resultados</p>
-                :filtered.map(d=>{
-                  const taken=takenIds.has(d.id);
-                  return(
-                    <div key={d.id} onClick={()=>goTo(d)} style={{padding:"9px 12px",borderRadius:8,cursor:"pointer",marginBottom:3,opacity:taken?0.45:1,border:`1px solid ${selected?.id===d.id?VENTANA_PALETTE[d.window]:"transparent"}`,background:selected?.id===d.id?VENTANA_PALETTE[d.window]+"15":"transparent",transition:"all 0.15s"}}>
-                      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-                        <span style={{fontSize:13,fontWeight:600,color:taken?textMut:textPri,textDecoration:taken?"line-through":"none"}}>{d.id}</span>
-                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:taken?(dark?"#1e2436":"#f1f5f9"):VENTANA_PALETTE[d.window]+"28",color:taken?"#475569":VENTANA_PALETTE[d.window]}}>
-                          {taken?"Tomado":d.window}
-                        </span>
-                      </div>
-                      <div style={{fontSize:11,color:textMut,lineHeight:1.4}}>{d.address}</div>
+                :filtered.map(d=>{const taken=takenIds.has(d.id);return(
+                  <div key={d.id} onClick={()=>goTo(d)} style={{padding:"9px 12px",borderRadius:8,cursor:"pointer",marginBottom:3,opacity:taken?0.45:1,border:`1px solid ${selected?.id===d.id?VENTANA_PALETTE[d.window]:"transparent"}`,background:selected?.id===d.id?VENTANA_PALETTE[d.window]+"15":"transparent",transition:"all 0.15s"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                      <span style={{fontSize:13,fontWeight:600,color:taken?textMut:textPri,textDecoration:taken?"line-through":"none"}}>{d.id}</span>
+                      <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:taken?(dark?"#1e2436":"#f1f5f9"):VENTANA_PALETTE[d.window]+"28",color:taken?"#475569":VENTANA_PALETTE[d.window]}}>{taken?"Tomado":d.window}</span>
                     </div>
-                  );
-                })
-              }
+                    <div style={{fontSize:11,color:textMut,lineHeight:1.4}}>{d.address}</div>
+                  </div>
+                );})}
             </div>
           </>)}
 
           {mode==="ruteo"&&(<>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Ventana de entrega</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 1 — Ventana de entrega</p>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
                 {VENTANAS.filter(v=>windowCounts[v]>0).map(v=>(
                   <button key={v} onClick={()=>{setSelectedWindow(v);setRoutes([]);setActiveRoute(null);setSinAsignar([]);setExcludedOrders([]);}} style={{padding:"8px 6px",borderRadius:6,border:`1px solid ${selectedWindow===v?VENTANA_PALETTE[v]:border}`,background:selectedWindow===v?VENTANA_PALETTE[v]:"transparent",color:selectedWindow===v?"#fff":textMut,fontSize:12,fontWeight:500,cursor:"pointer"}}>
@@ -447,7 +422,7 @@ export default function App() {
               </div>
             </div>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`}}>
-              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Pedidos por ruta</p>
+              <p style={{fontSize:11,color:textMut,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Paso 2 — Pedidos por ruta</p>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
                 <button onClick={()=>setBatchSize(b=>Math.max(2,b-1))} style={{width:30,height:30,borderRadius:6,background:inputBg,border:`1px solid ${inputBdr}`,color:textMut,fontSize:18,cursor:"pointer"}}>−</button>
                 <span style={{fontSize:24,fontWeight:600,color:textPri,minWidth:32,textAlign:"center"}}>{batchSize}</span>
@@ -466,12 +441,7 @@ export default function App() {
               </div>
             </div>
             <div style={{padding:"12px 14px",borderBottom:`1px solid ${border}`,display:"flex",flexDirection:"column",gap:6}}>
-              {selectedWindow&&(
-                <div style={{fontSize:11,color:textMut,marginBottom:2}}>
-                  {pendingCount} pendientes · {routedIds.size} ruteados hoy
-                  {zones.length>0&&<span style={{color:"#f59e0b",marginLeft:6}}>· {zones.length} zona{zones.length>1?"s":""} excluida{zones.length>1?"s":""}</span>}
-                </div>
-              )}
+              {selectedWindow&&<div style={{fontSize:11,color:textMut,marginBottom:2}}>{pendingCount} pendientes · {routedIds.size} ruteados hoy{zones.length>0&&<span style={{color:"#f59e0b",marginLeft:6}}>· {zones.length} zona{zones.length>1?"s":""} excluida{zones.length>1?"s":""}</span>}</div>}
               <button onClick={()=>handleGenerate(false)} disabled={!selectedWindow||pendingCount===0} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:selectedWindow&&pendingCount>0?"pointer":"default",fontSize:13,fontWeight:500,color:"#fff",background:selectedWindow&&pendingCount>0?VENTANA_PALETTE[selectedWindow]:"#334155"}}>
                 {selectedWindow?pendingCount>0?`Generar rutas (${pendingCount} nuevos)`:"Sin pedidos nuevos":"Selecciona una ventana"}
               </button>
@@ -480,9 +450,7 @@ export default function App() {
               </button>
             </div>
             <div style={{flex:1,overflowY:"auto",padding:8}}>
-              {routes.length===0?(
-                <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px",lineHeight:1.6}}>Selecciona una ventana y genera las rutas</div>
-              ):(
+              {routes.length===0?<div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px",lineHeight:1.6}}>Selecciona una ventana y genera las rutas</div>:(
                 <>
                   <div style={{padding:"4px 8px 8px",fontSize:11,color:textMut}}>
                     {routes.length} rutas · {routes.reduce((s,r)=>s+r.orders.length,0)} asignados
@@ -497,22 +465,19 @@ export default function App() {
                           <span style={{fontSize:12,fontWeight:600,color:r.hidden?textMut:textPri}}>{r.label}</span>
                           <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:r.color+"25",color:r.color}}>{r.orders.length} stops</span>
                         </div>
-                        <div onClick={()=>toggleHideRoute(r.id)} style={{width:36,height:20,borderRadius:10,cursor:"pointer",position:"relative",flexShrink:0,transition:"background 0.2s",background:r.hidden?(dark?"#2a3044":"#cbd5e1"):r.color+"99"}}>
+                        <div onClick={()=>toggleHideRoute(r.id)} style={{width:36,height:20,borderRadius:10,cursor:"pointer",position:"relative",flexShrink:0,background:r.hidden?(dark?"#2a3044":"#cbd5e1"):r.color+"99"}}>
                           <div style={{width:14,height:14,borderRadius:"50%",background:"#fff",position:"absolute",top:3,transition:"left 0.2s",left:r.hidden?3:19}}/>
                         </div>
                       </div>
                       {activeRoute===r.id&&!r.hidden&&(
                         <div style={{padding:"0 10px 8px"}}>
-                          {r.orders.map((o,i)=>{
-                            const taken=takenIds.has(o.id);
-                            return(
-                              <div key={o.id} style={{fontSize:11,color:taken?"#475569":textMut,padding:"2px 0",display:"flex",gap:5,alignItems:"center"}}>
-                                <span style={{color:"#475569",fontWeight:500,width:14,flexShrink:0}}>{i+1}.</span>
-                                <span style={{textDecoration:taken?"line-through":"none"}}>{o.id} — {o.address.split(",")[0]}</span>
-                                {taken&&<span style={{fontSize:9,padding:"1px 5px",borderRadius:6,background:"#1e2436",color:"#475569"}}>Tomado</span>}
-                              </div>
-                            );
-                          })}
+                          {r.orders.map((o,i)=>{const taken=takenIds.has(o.id);return(
+                            <div key={o.id} style={{fontSize:11,color:taken?"#475569":textMut,padding:"2px 0",display:"flex",gap:5,alignItems:"center"}}>
+                              <span style={{color:"#475569",fontWeight:500,width:14,flexShrink:0}}>{i+1}.</span>
+                              <span style={{textDecoration:taken?"line-through":"none"}}>{o.id} — {o.address.split(",")[0]}</span>
+                              {taken&&<span style={{fontSize:9,padding:"1px 5px",borderRadius:6,background:"#1e2436",color:"#475569"}}>Tomado</span>}
+                            </div>
+                          );})}
                         </div>
                       )}
                     </div>
@@ -522,13 +487,11 @@ export default function App() {
                       <div style={{padding:"8px 10px",display:"flex",alignItems:"center",gap:7}}>
                         <div style={{width:9,height:9,borderRadius:"50%",background:"#94a3b8",flexShrink:0}}/>
                         <span style={{fontSize:12,fontWeight:600,color:textMut,flex:1}}>Sin ruta (quedan disponibles)</span>
-                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:dark?"#1e2436":"#f1f5f9",color:textMut}}>{sinAsignar.length}</span>
+                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:dark?"#1e2436":"#f1f5f9",color:textMut}}>{sinAsignar.length}</span>
                       </div>
                       <div style={{padding:"0 10px 8px"}}>
-                        <div style={{fontSize:11,color:textMut,marginBottom:4,lineHeight:1.4}}>No completaron el batch de {batchSize}. Se incluirán en la próxima generación.</div>
-                        {sinAsignar.map(o=>(
-                          <div key={o.id} style={{fontSize:11,color:textMut,padding:"1px 0"}}>{o.id} — {o.address.split(",")[0]}</div>
-                        ))}
+                        <div style={{fontSize:11,color:textMut,marginBottom:4}}>No completaron el batch de {batchSize} dentro de {maxDistKm}km.</div>
+                        {sinAsignar.map(o=><div key={o.id} style={{fontSize:11,color:textMut,padding:"1px 0"}}>{o.id} — {o.address.split(",")[0]}</div>)}
                       </div>
                     </div>
                   )}
@@ -537,15 +500,10 @@ export default function App() {
                       <div style={{padding:"8px 10px",display:"flex",alignItems:"center",gap:7}}>
                         <div style={{width:9,height:9,borderRadius:"50%",background:"#f59e0b",flexShrink:0}}/>
                         <span style={{fontSize:12,fontWeight:600,color:"#f59e0b",flex:1}}>Zona excluida</span>
-                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:600,background:"#f59e0b25",color:"#f59e0b"}}>{excludedOrders.length}</span>
+                        <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:"#f59e0b25",color:"#f59e0b"}}>{excludedOrders.length}</span>
                       </div>
                       <div style={{padding:"0 10px 8px"}}>
-                        {excludedOrders.map(o=>(
-                          <div key={o.id} style={{fontSize:11,color:textMut,padding:"1px 0",display:"flex",gap:5}}>
-                            <span style={{color:"#ef4444",fontSize:10}}>✕</span>
-                            <span>{o.id} — {o.address.split(",")[0]}</span>
-                          </div>
-                        ))}
+                        {excludedOrders.map(o=><div key={o.id} style={{fontSize:11,color:textMut,padding:"1px 0",display:"flex",gap:5}}><span style={{color:"#ef4444",fontSize:10}}>✕</span><span>{o.id} — {o.address.split(",")[0]}</span></div>)}
                       </div>
                     </div>
                   )}
@@ -562,123 +520,95 @@ export default function App() {
                 <button onClick={()=>setMode("mapa")} style={{marginLeft:"auto",fontSize:11,padding:"2px 8px",borderRadius:6,border:`1px solid ${border}`,background:"transparent",color:textMut,cursor:"pointer"}}>✕ Salir</button>
               </div>
               <p style={{fontSize:12,color:textMut,marginBottom:10,lineHeight:1.5}}>Pedidos dentro de estas zonas serán excluidos del ruteo.</p>
-              {!drawing?(
-                <button onClick={()=>setDrawing(true)} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#ef4444"}}>+ Dibujar nueva zona</button>
-              ):(
-                <div>
+              {!drawing
+                ?<button onClick={()=>setDrawing(true)} style={{width:"100%",padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#ef4444"}}>+ Dibujar nueva zona</button>
+                :<div>
                   <div style={{fontSize:12,color:"#f59e0b",marginBottom:8,padding:"8px",background:dark?"#1c1206":"#fffbeb",borderRadius:6,lineHeight:1.5}}>
-                    Clic en el mapa para marcar puntos. Mínimo 3.
-                    <br/><strong style={{color:"#f1f5f9"}}>{currentPoints.length} puntos</strong> marcados
+                    Clic en el mapa para marcar puntos. Mínimo 3.<br/><strong style={{color:"#f1f5f9"}}>{currentPoints.length} puntos</strong> marcados
                   </div>
                   <div style={{display:"flex",gap:6}}>
                     <button onClick={closePolygon} disabled={currentPoints.length<3} style={{flex:1,padding:"8px",borderRadius:8,border:"none",cursor:currentPoints.length>=3?"pointer":"default",fontSize:12,fontWeight:500,color:"#fff",background:currentPoints.length>=3?"#22c55e":"#334155"}}>Cerrar zona</button>
                     <button onClick={cancelDrawing} style={{flex:1,padding:"8px",borderRadius:8,border:`1px solid ${border}`,cursor:"pointer",fontSize:12,color:textMut,background:"transparent"}}>Cancelar</button>
                   </div>
                 </div>
-              )}
+              }
             </div>
             <div style={{flex:1,overflowY:"auto",padding:8}}>
-              {zones.length===0?(
-                <div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px"}}>No hay zonas. Dibuja una en el mapa.</div>
-              ):zones.map(z=>(
-                <div key={z.id} style={{borderRadius:8,border:`1px solid ${z.color}44`,marginBottom:5,padding:"10px 12px",background:z.color+"11"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <div style={{width:10,height:10,borderRadius:"50%",background:z.color,flexShrink:0}}/>
-                    <span style={{fontSize:13,fontWeight:600,color:textPri,flex:1}}>{z.name}</span>
-                    <button onClick={()=>{setDeleteConfirm(z.id);setDeletePassword("");setDeleteError("");}} style={{fontSize:11,padding:"2px 8px",borderRadius:6,border:"1px solid #ef444444",background:"#ef444411",color:"#ef4444",cursor:"pointer"}}>Borrar</button>
+              {zones.length===0?<div style={{textAlign:"center",color:textMut,fontSize:13,padding:"24px 16px"}}>No hay zonas. Dibuja una en el mapa.</div>
+                :zones.map(z=>(
+                  <div key={z.id} style={{borderRadius:8,border:`1px solid ${z.color}44`,marginBottom:5,padding:"10px 12px",background:z.color+"11"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{width:10,height:10,borderRadius:"50%",background:z.color,flexShrink:0}}/>
+                      <span style={{fontSize:13,fontWeight:600,color:textPri,flex:1}}>{z.name}</span>
+                      <button onClick={()=>{setDeleteConfirm(z.id);setDeletePassword("");setDeleteError("");}} style={{fontSize:11,padding:"2px 8px",borderRadius:6,border:"1px solid #ef444444",background:"#ef444411",color:"#ef4444",cursor:"pointer"}}>Borrar</button>
+                    </div>
+                    <div style={{fontSize:11,color:textMut,marginTop:4}}>{z.points.length} puntos · {new Date(z.createdAt).toLocaleDateString("es-CL")}</div>
                   </div>
-                  <div style={{fontSize:11,color:textMut,marginTop:4}}>{z.points.length} puntos · {new Date(z.createdAt).toLocaleDateString("es-CL")}</div>
-                </div>
-              ))}
+                ))
+              }
             </div>
           </>)}
         </aside>
 
         <div style={{flex:1,position:"relative"}}>
-          {!isLoaded
-            ?<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"#475569"}}>Cargando mapa...</div>
-            :(
-              <GoogleMap mapContainerStyle={{width:"100%",height:"100%"}} center={MAP_CENTER} zoom={11} onLoad={onLoad}
-                onClick={mode==="zonas"&&drawing?handleMapClick:undefined}
-                options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
+          {!isLoaded?<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"#475569"}}>Cargando mapa...</div>:(
+            <GoogleMap mapContainerStyle={{width:"100%",height:"100%"}} center={MAP_CENTER} zoom={11} onLoad={onLoad}
+              onClick={mode==="zonas"&&drawing?handleMapClick:undefined}
+              options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
 
-                {zones.map(z=>(
-                  <Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.3,strokeWeight:1}}/>
-                ))}
-                {drawing&&currentPoints.length>=2&&<Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>}
-                {drawing&&currentPoints.map((p,i)=>(
-                  <Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#ef4444" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>
-                ))}
+              {zones.map(z=><Polygon key={z.id} paths={z.points} options={{fillColor:z.color,fillOpacity:0.06,strokeColor:z.color,strokeOpacity:0.6,strokeWeight:1.5}}/>)}
+              {drawing&&currentPoints.length>=2&&<Polygon paths={currentPoints} options={{fillColor:"#ef4444",fillOpacity:0.1,strokeColor:"#ef4444",strokeOpacity:0.8,strokeWeight:2}}/>}
+              {drawing&&currentPoints.map((p,i)=><Marker key={i} position={p} icon={{url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><circle cx="6" cy="6" r="5" fill="#ef4444" stroke="white" stroke-width="1.5"/></svg>`)}`,scaledSize:{width:12,height:12},anchor:{x:6,y:6}}}/>)}
 
-                {mode==="mapa"&&filtered.map(d=>(
-                  <Marker key={d.id} position={{lat:d.lat,lng:d.lng}} icon={makePinSvg(VENTANA_PALETTE[d.window],takenIds.has(d.id))} onClick={()=>setSelected(d)}/>
-                ))}
-                {mode==="mapa"&&selected&&(
-                  <InfoWindow position={{lat:selected.lat,lng:selected.lng}} onCloseClick={()=>setSelected(null)}>
-                    <div style={{fontFamily:"sans-serif",minWidth:180,padding:4}}>
-                      <p style={{fontWeight:700,fontSize:14,marginBottom:4,color:"#0f172a"}}>{selected.id}</p>
-                      <p style={{fontSize:12,color:"#475569",marginBottom:10,lineHeight:1.4}}>{selected.address}</p>
-                      <div style={{display:"flex",gap:6}}>
-                        <span style={{fontSize:11,padding:"2px 8px",borderRadius:8,fontWeight:600,background:VENTANA_PALETTE[selected.window]+"25",color:VENTANA_PALETTE[selected.window]}}>{selected.window}</span>
-                        <button onClick={()=>toggleTaken(selected.id)} style={{fontSize:11,padding:"3px 10px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"none",background:takenIds.has(selected.id)?"#dcfce7":"#fee2e2",color:takenIds.has(selected.id)?"#15803d":"#b91c1c"}}>
-                          {takenIds.has(selected.id)?"✓ Desmarcar":"Marcar tomado"}
-                        </button>
-                      </div>
+              {mode==="mapa"&&filtered.map(d=><Marker key={d.id} position={{lat:d.lat,lng:d.lng}} icon={makePinSvg(VENTANA_PALETTE[d.window],takenIds.has(d.id))} onClick={()=>setSelected(d)}/>)}
+              {mode==="mapa"&&selected&&(
+                <InfoWindow position={{lat:selected.lat,lng:selected.lng}} onCloseClick={()=>setSelected(null)}>
+                  <div style={{fontFamily:"sans-serif",minWidth:180,padding:4}}>
+                    <p style={{fontWeight:700,fontSize:14,marginBottom:4,color:"#0f172a"}}>{selected.id}</p>
+                    <p style={{fontSize:12,color:"#475569",marginBottom:10,lineHeight:1.4}}>{selected.address}</p>
+                    <div style={{display:"flex",gap:6}}>
+                      <span style={{fontSize:11,padding:"2px 8px",borderRadius:8,fontWeight:600,background:VENTANA_PALETTE[selected.window]+"25",color:VENTANA_PALETTE[selected.window]}}>{selected.window}</span>
+                      <button onClick={()=>toggleTaken(selected.id)} style={{fontSize:11,padding:"3px 10px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"none",background:takenIds.has(selected.id)?"#dcfce7":"#fee2e2",color:takenIds.has(selected.id)?"#15803d":"#b91c1c"}}>{takenIds.has(selected.id)?"✓ Desmarcar":"Marcar tomado"}</button>
                     </div>
-                  </InfoWindow>
-                )}
+                  </div>
+                </InfoWindow>
+              )}
 
-                {mode==="ruteo"&&routes.filter(r=>!r.hidden).map(r=>{
-                  const hull=convexHull(r.orders);
-                  const expanded=expandHull(hull);
-                  const isActive=activeRoute===r.id;
-                  return(
-                    <React.Fragment key={r.id}>
-                      {expanded.length>=3&&<Polygon paths={expanded} options={{fillColor:r.color,fillOpacity:isActive?0.25:0.12,strokeColor:r.color,strokeOpacity:isActive?1:0.6,strokeWeight:isActive?2.5:1.5}} onClick={()=>setActiveRoute(activeRoute===r.id?null:r.id)}/>}
-                      {isActive&&<Polyline path={r.orders.map(o=>({lat:o.lat,lng:o.lng}))} options={{strokeColor:r.color,strokeOpacity:0.5,strokeWeight:2,geodesic:true}}/>}
-                      {r.orders.map(o=>(
-                        <Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeRoutePinSvg(r.color,r.routeNum,takenIds.has(o.id))} onClick={()=>setSelected(o)}/>
-                      ))}
-                    </React.Fragment>
-                  );
-                })}
-
-                {mode==="ruteo"&&sinAsignar.map(o=>(
-                  <Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makePendingPin()} onClick={()=>setSelected(o)}/>
-                ))}
-                {mode==="ruteo"&&excludedOrders.map(o=>(
-                  <Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeExcludedPin()} onClick={()=>setSelected(o)}/>
-                ))}
-                {mode==="ruteo"&&selected&&(
-                  <InfoWindow position={{lat:selected.lat,lng:selected.lng}} onCloseClick={()=>setSelected(null)}>
-                    <div style={{fontFamily:"sans-serif",minWidth:180,padding:4}}>
-                      <p style={{fontWeight:700,fontSize:14,marginBottom:4,color:"#0f172a"}}>{selected.id}</p>
-                      <p style={{fontSize:12,color:"#475569",marginBottom:10,lineHeight:1.4}}>{selected.address}</p>
-                      <div style={{display:"flex",gap:6}}>
-                        <span style={{fontSize:11,padding:"2px 8px",borderRadius:8,fontWeight:600,background:VENTANA_PALETTE[selected.window]+"25",color:VENTANA_PALETTE[selected.window]}}>{selected.window}</span>
-                        <button onClick={()=>toggleTaken(selected.id)} style={{fontSize:11,padding:"3px 10px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"none",background:takenIds.has(selected.id)?"#dcfce7":"#fee2e2",color:takenIds.has(selected.id)?"#15803d":"#b91c1c"}}>
-                          {takenIds.has(selected.id)?"✓ Desmarcar":"Marcar tomado"}
-                        </button>
-                      </div>
+              {mode==="ruteo"&&routes.filter(r=>!r.hidden).map(r=>{
+                const hull=convexHull(r.orders);
+                const expanded=expandHull(hull);
+                const isActive=activeRoute===r.id;
+                return(
+                  <React.Fragment key={r.id}>
+                    {expanded.length>=3&&<Polygon paths={expanded} options={{fillColor:r.color,fillOpacity:isActive?0.25:0.12,strokeColor:r.color,strokeOpacity:isActive?1:0.6,strokeWeight:isActive?2.5:1.5}} onClick={()=>setActiveRoute(activeRoute===r.id?null:r.id)}/>}
+                    {isActive&&<Polyline path={r.orders.map(o=>({lat:o.lat,lng:o.lng}))} options={{strokeColor:r.color,strokeOpacity:0.5,strokeWeight:2,geodesic:true}}/>}
+                    {r.orders.map(o=><Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeRoutePinSvg(r.color,r.routeNum,takenIds.has(o.id))} onClick={()=>setSelected(o)}/>)}
+                  </React.Fragment>
+                );
+              })}
+              {mode==="ruteo"&&sinAsignar.map(o=><Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makePendingPin()} onClick={()=>setSelected(o)}/>)}
+              {mode==="ruteo"&&excludedOrders.map(o=><Marker key={o.id} position={{lat:o.lat,lng:o.lng}} icon={makeExcludedPin()} onClick={()=>setSelected(o)}/>)}
+              {mode==="ruteo"&&selected&&(
+                <InfoWindow position={{lat:selected.lat,lng:selected.lng}} onCloseClick={()=>setSelected(null)}>
+                  <div style={{fontFamily:"sans-serif",minWidth:180,padding:4}}>
+                    <p style={{fontWeight:700,fontSize:14,marginBottom:4,color:"#0f172a"}}>{selected.id}</p>
+                    <p style={{fontSize:12,color:"#475569",marginBottom:10,lineHeight:1.4}}>{selected.address}</p>
+                    <div style={{display:"flex",gap:6}}>
+                      <span style={{fontSize:11,padding:"2px 8px",borderRadius:8,fontWeight:600,background:VENTANA_PALETTE[selected.window]+"25",color:VENTANA_PALETTE[selected.window]}}>{selected.window}</span>
+                      <button onClick={()=>toggleTaken(selected.id)} style={{fontSize:11,padding:"3px 10px",borderRadius:8,fontWeight:600,cursor:"pointer",border:"none",background:takenIds.has(selected.id)?"#dcfce7":"#fee2e2",color:takenIds.has(selected.id)?"#15803d":"#b91c1c"}}>{takenIds.has(selected.id)?"✓ Desmarcar":"Marcar tomado"}</button>
                     </div>
-                  </InfoWindow>
-                )}
-              </GoogleMap>
-            )
-          }
+                  </div>
+                </InfoWindow>
+              )}
+            </GoogleMap>
+          )}
 
           {showZoneModal&&(
             <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}>
               <div style={{background:dark?"#151820":"#fff",borderRadius:12,padding:24,width:320,border:`1px solid ${border}`}}>
                 <p style={{fontSize:15,fontWeight:600,color:textPri,marginBottom:16}}>Guardar zona de exclusión</p>
-                <div style={{marginBottom:12}}>
-                  <p style={{fontSize:12,color:textMut,marginBottom:6}}>Nombre de la zona</p>
-                  <input value={zoneName} onChange={e=>setZoneName(e.target.value)} placeholder="Ej: Cerro San Cristóbal" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/>
-                </div>
-                <div style={{marginBottom:16}}>
-                  <p style={{fontSize:12,color:textMut,marginBottom:6}}>Contraseña de administrador</p>
-                  <input type="password" value={zonePassword} onChange={e=>setZonePassword(e.target.value)} placeholder="••••••••" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/>
-                </div>
+                <div style={{marginBottom:12}}><p style={{fontSize:12,color:textMut,marginBottom:6}}>Nombre de la zona</p><input value={zoneName} onChange={e=>setZoneName(e.target.value)} placeholder="Ej: Cerro San Cristóbal" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/></div>
+                <div style={{marginBottom:16}}><p style={{fontSize:12,color:textMut,marginBottom:6}}>Contraseña de administrador</p><input type="password" value={zonePassword} onChange={e=>setZonePassword(e.target.value)} placeholder="••••••••" style={{width:"100%",background:inputBg,border:`1px solid ${inputBdr}`,color:textPri,fontSize:13,padding:"8px 12px",borderRadius:8,outline:"none",boxSizing:"border-box"}}/></div>
                 {zoneError&&<p style={{fontSize:12,color:"#ef4444",marginBottom:12}}>{zoneError}</p>}
                 <div style={{display:"flex",gap:8}}>
                   <button onClick={saveZone} style={{flex:1,padding:"10px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#22c55e"}}>Guardar</button>
