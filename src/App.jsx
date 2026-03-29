@@ -3,7 +3,6 @@ import { GoogleMap, useJsApiLoader, Marker, InfoWindow, Polygon, Polyline } from
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "firebase/firestore";
 
-// ── Firebase ──────────────────────────────────────────────────────
 const firebaseConfig = {
   apiKey: "AIzaSyCdY8bdceRG1XMhdomKZ2cpC_4a8ORrt_Q",
   authDomain: "zubale-maps.firebaseapp.com",
@@ -15,7 +14,6 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
-// ── Paleta de ventanas ────────────────────────────────────────────
 const VENTANA_PALETTE = {
   "V9":"#3b82f6","V10":"#f97316","V11":"#22c55e","V12":"#a855f7",
   "V13":"#ef4444","V14":"#14b8a6","V15":"#f59e0b","V16":"#ec4899",
@@ -29,7 +27,22 @@ const ROUTE_COLORS = [
   "#06b6d4","#f43f5e","#8b5cf6","#10b981","#fb923c",
 ];
 
-// ── Pins ──────────────────────────────────────────────────────────
+// Pin con número de RUTA (no de parada)
+function makeRoutePinSvg(hex, routeNum, taken = false) {
+  const c = taken ? "#64748b" : (hex || "#3b82f6");
+  return {
+    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="36" viewBox="0 0 28 36">
+        <path d="M14 0C6.27 0 0 6.27 0 14C0 24.5 14 36 14 36S28 24.5 28 14C28 6.27 21.73 0 14 0Z" fill="${c}" opacity="${taken ? 0.4 : 1}"/>
+        <circle cx="14" cy="14" r="9" fill="white" opacity="0.95"/>
+        <text x="14" y="18" text-anchor="middle" font-size="11" font-weight="700" fill="${c}" font-family="sans-serif">${routeNum}</text>
+      </svg>`
+    )}`,
+    scaledSize: { width: 28, height: 36 },
+    anchor: { x: 14, y: 36 },
+  };
+}
+
 function makePinSvg(hex, taken = false) {
   const c = taken ? "#64748b" : (hex || "#3b82f6");
   return {
@@ -45,22 +58,6 @@ function makePinSvg(hex, taken = false) {
   };
 }
 
-function makeNumberPin(hex, num, taken = false) {
-  const c = taken ? "#64748b" : (hex || "#3b82f6");
-  return {
-    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="34" viewBox="0 0 26 34">
-        <path d="M13 0C5.82 0 0 5.82 0 13C0 22.75 13 34 13 34S26 22.75 26 13C26 5.82 20.18 0 13 0Z" fill="${c}" opacity="${taken ? 0.4 : 1}"/>
-        <circle cx="13" cy="13" r="8" fill="white" opacity="0.95"/>
-        <text x="13" y="17" text-anchor="middle" font-size="10" font-weight="700" fill="${c}" font-family="sans-serif">${num}</text>
-      </svg>`
-    )}`,
-    scaledSize: { width: 26, height: 34 },
-    anchor: { x: 13, y: 34 },
-  };
-}
-
-// ── Mapa ──────────────────────────────────────────────────────────
 const MAP_CENTER = { lat: -33.47, lng: -70.64 };
 const MAP_STYLE_DARK = [
   { elementType: "geometry", stylers: [{ color: "#1a1f2e" }] },
@@ -77,37 +74,80 @@ const MAP_STYLE_LIGHT = [
   { featureType: "transit", stylers: [{ visibility: "off" }] },
 ];
 
-// ── Algoritmo de ruteo ────────────────────────────────────────────
-function dist(a, b) {
-  return Math.sqrt((a.lat - b.lat) ** 2 + (a.lng - b.lng) ** 2);
+// ── Algoritmo de ruteo mejorado ───────────────────────────────────
+// Distancia en km usando Haversine (más preciso que pytágoras)
+function distKm(a, b) {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLng = (b.lng - a.lng) * Math.PI / 180;
+  const x = Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) *
+    Math.sin(dLng/2) * Math.sin(dLng/2);
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+}
+
+// Calcula el radio típico del grupo (percentil 75 de distancias al centroide)
+function calcGroupRadius(orders) {
+  if (orders.length < 2) return Infinity;
+  const cLat = orders.reduce((s, o) => s + o.lat, 0) / orders.length;
+  const cLng = orders.reduce((s, o) => s + o.lng, 0) / orders.length;
+  const centroid = { lat: cLat, lng: cLng };
+  const distances = orders.map(o => distKm(o, centroid)).sort((a, b) => a - b);
+  const p75idx = Math.floor(distances.length * 0.75);
+  return distances[p75idx] * 2.5; // umbral = 2.5x el radio típico
 }
 
 function generateRoutes(orders, batchSize) {
+  if (orders.length === 0) return [];
+
+  // Calcular umbral de distancia máxima basado en la dispersión real de los datos
+  const globalRadius = calcGroupRadius(orders);
+  // Mínimo 0.5km, máximo 5km — evita umbrales absurdos
+  const MAX_DIST_KM = Math.min(Math.max(globalRadius, 0.5), 5);
+
   const remaining = [...orders];
   const routes = [];
+  const sinAsignar = []; // puntos demasiado lejanos
+
   let ci = 0;
   while (remaining.length > 0) {
     const seed = remaining.shift();
     const route = [seed];
+
     while (route.length < batchSize && remaining.length > 0) {
       const cLat = route.reduce((s, o) => s + o.lat, 0) / route.length;
       const cLng = route.reduce((s, o) => s + o.lng, 0) / route.length;
-      let bi = 0, bd = Infinity;
+      const centroid = { lat: cLat, lng: cLng };
+
+      // Buscar el más cercano QUE ESTÉ dentro del umbral
+      let bestIdx = -1, bestDist = Infinity;
       remaining.forEach((o, i) => {
-        const d = dist(o, { lat: cLat, lng: cLng });
-        if (d < bd) { bd = d; bi = i; }
+        const d = distKm(o, centroid);
+        if (d < bestDist && d <= MAX_DIST_KM) {
+          bestDist = d;
+          bestIdx = i;
+        }
       });
-      route.push(remaining.splice(bi, 1)[0]);
+
+      if (bestIdx === -1) break; // ninguno cercano disponible
+      route.push(remaining.splice(bestIdx, 1)[0]);
     }
-    routes.push({
-      id: `Ruta ${routes.length + 1}`,
-      window: orders[0]?.window,
-      color: ROUTE_COLORS[ci % ROUTE_COLORS.length],
-      orders: route,
-      hidden: false,
-    });
-    ci++;
+
+    // Solo crear ruta si tiene al menos 1 pedido
+    if (route.length >= 1) {
+      routes.push({
+        id: `R${routes.length + 1}`,
+        label: `Ruta ${routes.length + 1}`,
+        window: orders[0]?.window,
+        color: ROUTE_COLORS[ci % ROUTE_COLORS.length],
+        orders: route,
+        hidden: false,
+        routeNum: routes.length + 1,
+      });
+      ci++;
+    }
   }
+
   return routes;
 }
 
@@ -127,8 +167,8 @@ function expandHull(points) {
   const cLat = points.reduce((s, p) => s + p.lat, 0) / points.length;
   const cLng = points.reduce((s, p) => s + p.lng, 0) / points.length;
   return points.map(p => ({
-    lat: cLat + (p.lat - cLat) * 1.35 + (p.lat > cLat ? 0.001 : -0.001),
-    lng: cLng + (p.lng - cLng) * 1.35 + (p.lng > cLng ? 0.001 : -0.001),
+    lat: cLat + (p.lat - cLat) * 1.3 + (p.lat > cLat ? 0.0008 : -0.0008),
+    lng: cLng + (p.lng - cLng) * 1.3 + (p.lng > cLng ? 0.0008 : -0.0008),
   }));
 }
 
@@ -141,41 +181,31 @@ const MOCK_DATA = [
   { id: "SG-002", address: "Av. Apoquindo 4500, Las Condes",    window: "V10", lat: -33.415, lng: -70.580 },
 ];
 
-// ── App principal ─────────────────────────────────────────────────
 export default function App() {
   const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
   const SHEETS_URL          = import.meta.env.VITE_SHEETS_URL;
 
   const { isLoaded } = useJsApiLoader({ googleMapsApiKey: GOOGLE_MAPS_API_KEY });
 
-  // Datos
-  const [data, setData]         = useState(MOCK_DATA);
-  const [loading, setLoading]   = useState(false);
-  const [lastSync, setLastSync] = useState(null);
-
-  // Navegación
-  const [mode, setMode] = useState("mapa");
-
-  // Mapa tradicional
-  const [filter, setFilter]     = useState("all");
-  const [search, setSearch]     = useState("");
-  const [selected, setSelected] = useState(null);
-  const [darkMap, setDarkMap]   = useState(true);
+  const [data, setData]           = useState(MOCK_DATA);
+  const [loading, setLoading]     = useState(false);
+  const [lastSync, setLastSync]   = useState(null);
+  const [mode, setMode]           = useState("mapa");
+  const [filter, setFilter]       = useState("all");
+  const [search, setSearch]       = useState("");
+  const [selected, setSelected]   = useState(null);
+  const [darkMap, setDarkMap]     = useState(true);
   const [hideTaken, setHideTaken] = useState(false);
-
-  // Firebase estados
-  const [takenIds, setTakenIds] = useState(new Set());
-
-  // Ruteo
+  const [takenIds, setTakenIds]   = useState(new Set());
   const [selectedWindow, setSelectedWindow] = useState(null);
   const [batchSize, setBatchSize]           = useState(3);
   const [routes, setRoutes]                 = useState([]);
   const [activeRoute, setActiveRoute]       = useState(null);
+  const [sinAsignar, setSinAsignar]         = useState([]);
 
   const mapRef = useRef(null);
   const onLoad = useCallback(map => { mapRef.current = map; }, []);
 
-  // ── Fetch Sheets ──────────────────────────────────────────────
   const fetchSheets = useCallback(async () => {
     if (!SHEETS_URL) return;
     setLoading(true);
@@ -202,7 +232,6 @@ export default function App() {
     return () => clearInterval(iv);
   }, [fetchSheets]);
 
-  // ── Firebase listener ─────────────────────────────────────────
   useEffect(() => {
     const colRef = collection(db, "taken", getTodayKey(), "orders");
     const unsub = onSnapshot(colRef, snap => {
@@ -213,7 +242,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // ── Marcar/desmarcar tomado ───────────────────────────────────
   async function toggleTaken(id) {
     const docRef = doc(db, "taken", getTodayKey(), "orders", id);
     if (takenIds.has(id)) await deleteDoc(docRef);
@@ -221,10 +249,8 @@ export default function App() {
     setSelected(null);
   }
 
-  // ── Reset modo al cambiar ─────────────────────────────────────
   useEffect(() => { setSelected(null); setActiveRoute(null); }, [mode]);
 
-  // ── Filtros mapa tradicional ──────────────────────────────────
   const filtered = data.filter(d => {
     const matchFilter = filter === "all" || d.window === filter;
     const q = search.toLowerCase();
@@ -245,16 +271,19 @@ export default function App() {
     return acc;
   }, {});
 
-  // ── Ruteo ─────────────────────────────────────────────────────
   function handleGenerate() {
     if (!selectedWindow) return;
     const windowOrders = data.filter(d => d.window === selectedWindow);
     const r = generateRoutes(windowOrders, batchSize);
+    // Pedidos sin asignar = los que quedaron solos por distancia
+    const asignados = new Set(r.flatMap(rt => rt.orders.map(o => o.id)));
+    const noAsignados = windowOrders.filter(o => !asignados.has(o.id));
+    setSinAsignar(noAsignados);
     setRoutes(r);
     setActiveRoute(null);
     if (mapRef.current && windowOrders.length > 0) {
       mapRef.current.panTo({ lat: windowOrders[0].lat, lng: windowOrders[0].lng });
-      mapRef.current.setZoom(13);
+      mapRef.current.setZoom(12);
     }
   }
 
@@ -262,7 +291,11 @@ export default function App() {
     setRoutes(prev => prev.map(r => r.id === routeId ? { ...r, hidden: !r.hidden } : r));
   }
 
-  // ── Estilos dinámicos ─────────────────────────────────────────
+  function goTo(d) {
+    setSelected(d);
+    if (mapRef.current) { mapRef.current.panTo({ lat: d.lat, lng: d.lng }); mapRef.current.setZoom(16); }
+  }
+
   const dark     = darkMap;
   const border   = dark ? "#1e2433" : "#e2e8f0";
   const textPri  = dark ? "#f1f5f9" : "#0f172a";
@@ -275,26 +308,18 @@ export default function App() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: appBg, fontFamily: "'DM Sans', sans-serif" }}>
 
-      {/* ── Barra navegación ──────────────────────────────────── */}
+      {/* Nav */}
       <div style={{ height: 48, background: dark ? "#151820" : "#ffffff", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", padding: "0 20px", gap: 4, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginRight: 16 }}>
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22d3ee" }} />
-          <span style={{ fontSize: 15, fontWeight: 600, color: textPri }}>Zubale Zones</span>
-          <span style={{ fontSize: 11, padding: "1px 7px", borderRadius: 10, background: "#1e0535", color: "#d8b4fe", fontWeight: 600 }}>V2L</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: textPri }}>Zubale Maps</span>
+          <span style={{ fontSize: 11, padding: "1px 7px", borderRadius: 10, background: "#1e0535", color: "#d8b4fe", fontWeight: 600 }}>V2</span>
         </div>
-
         {["mapa", "ruteo"].map(m => (
-          <button key={m} onClick={() => setMode(m)} style={{
-            padding: "6px 16px", borderRadius: 6, border: "none", cursor: "pointer",
-            fontSize: 13, fontWeight: 500,
-            background: mode === m ? (dark ? "#1e2436" : "#f1f5f9") : "transparent",
-            color: mode === m ? textPri : textMut,
-            borderBottom: mode === m ? "2px solid #3b82f6" : "2px solid transparent",
-          }}>
+          <button key={m} onClick={() => setMode(m)} style={{ padding: "6px 16px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 500, background: mode === m ? (dark ? "#1e2436" : "#f1f5f9") : "transparent", color: mode === m ? textPri : textMut, borderBottom: mode === m ? "2px solid #3b82f6" : "2px solid transparent" }}>
             {m === "mapa" ? "Mapa" : "Ruteo"}
           </button>
         ))}
-
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           {SHEETS_URL && (
             <span onClick={fetchSheets} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, background: loading ? "#2c1006" : "#0c1d35", color: loading ? "#fdba74" : "#93c5fd", fontWeight: 500, cursor: "pointer" }}>
@@ -307,15 +332,13 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── Contenido ─────────────────────────────────────────── */}
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
 
-        {/* ── SIDEBAR ─────────────────────────────────────────── */}
+        {/* Sidebar */}
         <aside style={{ width: 290, minWidth: 290, background: sideBg, borderRight: `1px solid ${border}`, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
           {mode === "mapa" ? (
             <>
-              {/* Toggle ocultar tomados */}
               <div style={{ padding: "10px 14px", borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 500, color: textPri }}>Ocultar tomados</div>
@@ -325,14 +348,10 @@ export default function App() {
                   <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, transition: "left 0.2s", left: hideTaken ? 23 : 3 }} />
                 </div>
               </div>
-
-              {/* Search */}
               <div style={{ padding: "10px 14px", borderBottom: `1px solid ${border}` }}>
                 <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar por ID o dirección..."
                   style={{ width: "100%", background: inputBg, border: `1px solid ${inputBdr}`, color: textPri, fontSize: 13, padding: "8px 12px", borderRadius: 8, outline: "none", boxSizing: "border-box" }} />
               </div>
-
-              {/* Filtro ventana */}
               <div style={{ padding: "10px 14px", borderBottom: `1px solid ${border}` }}>
                 <p style={{ fontSize: 11, color: textMut, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Ventana de entrega</p>
                 <select value={filter} onChange={e => setFilter(e.target.value)}
@@ -341,8 +360,6 @@ export default function App() {
                   {VENTANAS.map(v => <option key={v} value={v}>{v}</option>)}
                 </select>
               </div>
-
-              {/* Leyenda */}
               <div style={{ padding: "10px 14px", borderBottom: `1px solid ${border}` }}>
                 <p style={{ fontSize: 11, color: textMut, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>Leyenda — clic para filtrar</p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3px 6px" }}>
@@ -356,8 +373,6 @@ export default function App() {
                   ))}
                 </div>
               </div>
-
-              {/* Lista */}
               <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
                 <div style={{ padding: "4px 8px 8px", fontSize: 11, color: textMut }}>Total: {filtered.length} registros</div>
                 {filtered.length === 0
@@ -382,12 +397,11 @@ export default function App() {
             </>
           ) : (
             <>
-              {/* Paso 1: Ventana */}
               <div style={{ padding: "12px 14px", borderBottom: `1px solid ${border}` }}>
                 <p style={{ fontSize: 11, color: textMut, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>Paso 1 — Ventana de entrega</p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                   {VENTANAS.filter(v => windowCounts[v] > 0).map(v => (
-                    <button key={v} onClick={() => { setSelectedWindow(v); setRoutes([]); setActiveRoute(null); }}
+                    <button key={v} onClick={() => { setSelectedWindow(v); setRoutes([]); setActiveRoute(null); setSinAsignar([]); }}
                       style={{ padding: "8px 6px", borderRadius: 6, border: `1px solid ${selectedWindow === v ? VENTANA_PALETTE[v] : border}`, background: selectedWindow === v ? VENTANA_PALETTE[v] : "transparent", color: selectedWindow === v ? "#fff" : textMut, fontSize: 12, fontWeight: 500, cursor: "pointer" }}>
                       {v} <span style={{ opacity: 0.75, fontSize: 10 }}>({windowCounts[v]})</span>
                     </button>
@@ -395,7 +409,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Paso 2: Batch */}
               <div style={{ padding: "12px 14px", borderBottom: `1px solid ${border}` }}>
                 <p style={{ fontSize: 11, color: textMut, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>Paso 2 — Pedidos por ruta</p>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -406,7 +419,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Paso 3: Generar */}
               <div style={{ padding: "12px 14px", borderBottom: `1px solid ${border}` }}>
                 <button onClick={handleGenerate} disabled={!selectedWindow}
                   style={{ width: "100%", padding: "10px", borderRadius: 8, border: "none", cursor: selectedWindow ? "pointer" : "default", fontSize: 13, fontWeight: 500, color: "#fff", background: selectedWindow ? VENTANA_PALETTE[selectedWindow] : "#334155" }}>
@@ -414,7 +426,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Lista rutas con toggle ocultar */}
               <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
                 {routes.length === 0 ? (
                   <div style={{ textAlign: "center", color: textMut, fontSize: 13, padding: "24px 16px", lineHeight: 1.6 }}>
@@ -423,30 +434,23 @@ export default function App() {
                 ) : (
                   <>
                     <div style={{ padding: "4px 8px 8px", fontSize: 11, color: textMut }}>
-                      {routes.length} rutas · {routes.reduce((s, r) => s + r.orders.length, 0)} pedidos
+                      {routes.length} rutas · {routes.reduce((s, r) => s + r.orders.length, 0)} pedidos asignados
+                      {sinAsignar.length > 0 && <span style={{ color: "#f59e0b", marginLeft: 6 }}>· {sinAsignar.length} sin asignar</span>}
                     </div>
-                    {routes.map(r => (
-                      <div key={r.id}
-                        style={{ borderRadius: 8, border: `1.5px solid ${activeRoute === r.id ? r.color : border}`, marginBottom: 5, overflow: "hidden", background: r.hidden ? (dark ? "#0f1117" : "#f8fafc") : (activeRoute === r.id ? r.color + "10" : "transparent"), opacity: r.hidden ? 0.5 : 1 }}>
 
+                    {routes.map(r => (
+                      <div key={r.id} style={{ borderRadius: 8, border: `1.5px solid ${activeRoute === r.id ? r.color : border}`, marginBottom: 5, overflow: "hidden", background: r.hidden ? (dark ? "#0f1117" : "#f8fafc") : (activeRoute === r.id ? r.color + "10" : "transparent"), opacity: r.hidden ? 0.5 : 1 }}>
                         <div style={{ padding: "8px 10px", display: "flex", alignItems: "center", gap: 7 }}>
-                          {/* Color dot + nombre — clic para activar */}
                           <div onClick={() => setActiveRoute(activeRoute === r.id ? null : r.id)} style={{ display: "flex", alignItems: "center", gap: 7, flex: 1, cursor: "pointer" }}>
-                            <div style={{ width: 10, height: 10, borderRadius: "50%", background: r.hidden ? "#475569" : r.color, flexShrink: 0 }} />
-                            <span style={{ fontSize: 12, fontWeight: 600, color: r.hidden ? textMut : textPri }}>{r.id}</span>
+                            <div style={{ width: 22, height: 22, borderRadius: "50%", background: r.hidden ? "#475569" : r.color, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#fff" }}>{r.routeNum}</div>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: r.hidden ? textMut : textPri }}>{r.label}</span>
                             <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 600, background: r.color + "25", color: r.color }}>{r.orders.length} stops</span>
                           </div>
-
-                          {/* Toggle ocultar ruta */}
-                          <div
-                            onClick={() => toggleHideRoute(r.id)}
-                            title={r.hidden ? "Mostrar ruta" : "Ocultar ruta"}
+                          <div onClick={() => toggleHideRoute(r.id)} title={r.hidden ? "Mostrar" : "Ocultar"}
                             style={{ width: 36, height: 20, borderRadius: 10, cursor: "pointer", position: "relative", flexShrink: 0, transition: "background 0.2s", background: r.hidden ? (dark ? "#2a3044" : "#cbd5e1") : r.color + "99" }}>
                             <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, transition: "left 0.2s", left: r.hidden ? 3 : 19 }} />
                           </div>
                         </div>
-
-                        {/* Stops — solo si está expandida y no oculta */}
                         {activeRoute === r.id && !r.hidden && (
                           <div style={{ padding: "0 10px 8px" }}>
                             {r.orders.map((o, i) => {
@@ -454,7 +458,7 @@ export default function App() {
                               return (
                                 <div key={o.id} style={{ fontSize: 11, color: taken ? "#475569" : textMut, padding: "2px 0", display: "flex", gap: 5, alignItems: "center" }}>
                                   <span style={{ color: "#475569", fontWeight: 500, width: 14, flexShrink: 0 }}>{i + 1}.</span>
-                                  <span style={{ textDecoration: taken ? "line-through" : "none" }}>{o.id}</span>
+                                  <span style={{ textDecoration: taken ? "line-through" : "none" }}>{o.id} — {o.address.split(",")[0]}</span>
                                   {taken && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 6, background: "#1e2436", color: "#475569" }}>Tomado</span>}
                                 </div>
                               );
@@ -463,6 +467,23 @@ export default function App() {
                         )}
                       </div>
                     ))}
+
+                    {/* Pedidos sin asignar */}
+                    {sinAsignar.length > 0 && (
+                      <div style={{ borderRadius: 8, border: `1px solid #854f0b`, marginTop: 8, overflow: "hidden", background: dark ? "#1c1206" : "#fffbeb" }}>
+                        <div style={{ padding: "8px 10px", display: "flex", alignItems: "center", gap: 7 }}>
+                          <div style={{ width: 9, height: 9, borderRadius: "50%", background: "#f59e0b", flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "#f59e0b", flex: 1 }}>Sin asignar</span>
+                          <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 600, background: "#f59e0b25", color: "#f59e0b" }}>{sinAsignar.length} pedidos</span>
+                        </div>
+                        <div style={{ padding: "0 10px 8px" }}>
+                          <div style={{ fontSize: 11, color: "#854f0b", marginBottom: 4 }}>Muy alejados del grupo principal</div>
+                          {sinAsignar.map(o => (
+                            <div key={o.id} style={{ fontSize: 11, color: textMut, padding: "1px 0" }}>{o.id} — {o.address.split(",")[0]}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -470,7 +491,7 @@ export default function App() {
           )}
         </aside>
 
-        {/* ── MAPA ──────────────────────────────────────────────── */}
+        {/* Mapa */}
         <div style={{ flex: 1, position: "relative" }}>
           {!isLoaded
             ? <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#475569" }}>Cargando mapa...</div>
@@ -480,7 +501,6 @@ export default function App() {
                 center={MAP_CENTER} zoom={11} onLoad={onLoad}
                 options={{ styles: dark ? MAP_STYLE_DARK : MAP_STYLE_LIGHT, zoomControl: true }}
               >
-                {/* ── Modo MAPA ── */}
                 {mode === "mapa" && filtered.map(d => (
                   <Marker key={d.id} position={{ lat: d.lat, lng: d.lng }}
                     icon={makePinSvg(VENTANA_PALETTE[d.window], takenIds.has(d.id))}
@@ -503,7 +523,6 @@ export default function App() {
                   </InfoWindow>
                 )}
 
-                {/* ── Modo RUTEO ── */}
                 {mode === "ruteo" && routes.filter(r => !r.hidden).map(r => {
                   const hull = convexHull(r.orders);
                   const expanded = expandHull(hull);
@@ -511,28 +530,30 @@ export default function App() {
                   return (
                     <div key={r.id}>
                       {expanded.length >= 3 && (
-                        <Polygon
-                          paths={expanded}
+                        <Polygon paths={expanded}
                           options={{ fillColor: r.color, fillOpacity: isActive ? 0.25 : 0.1, strokeColor: r.color, strokeOpacity: isActive ? 1 : 0.5, strokeWeight: isActive ? 2.5 : 1.5 }}
-                          onClick={() => setActiveRoute(activeRoute === r.id ? null : r.id)}
-                        />
+                          onClick={() => setActiveRoute(activeRoute === r.id ? null : r.id)} />
                       )}
                       {isActive && (
-                        <Polyline
-                          path={r.orders.map(o => ({ lat: o.lat, lng: o.lng }))}
-                          options={{ strokeColor: r.color, strokeOpacity: 0.5, strokeWeight: 2, geodesic: true }}
-                        />
+                        <Polyline path={r.orders.map(o => ({ lat: o.lat, lng: o.lng }))}
+                          options={{ strokeColor: r.color, strokeOpacity: 0.5, strokeWeight: 2, geodesic: true }} />
                       )}
-                      {r.orders.map((o, i) => (
+                      {r.orders.map(o => (
                         <Marker key={o.id} position={{ lat: o.lat, lng: o.lng }}
-                          icon={makeNumberPin(r.color, i + 1, takenIds.has(o.id))}
+                          icon={makeRoutePinSvg(r.color, r.routeNum, takenIds.has(o.id))}
                           onClick={() => setSelected(o)} />
                       ))}
                     </div>
                   );
                 })}
 
-                {/* InfoWindow en modo ruteo */}
+                {/* Pins sin asignar en amarillo */}
+                {mode === "ruteo" && sinAsignar.map(o => (
+                  <Marker key={o.id} position={{ lat: o.lat, lng: o.lng }}
+                    icon={makePinSvg("#f59e0b", false)}
+                    onClick={() => setSelected(o)} />
+                ))}
+
                 {mode === "ruteo" && selected && (
                   <InfoWindow position={{ lat: selected.lat, lng: selected.lng }} onCloseClick={() => setSelected(null)}>
                     <div style={{ fontFamily: "sans-serif", minWidth: 180, padding: 4 }}>
@@ -555,9 +576,4 @@ export default function App() {
       </div>
     </div>
   );
-
-  function goTo(d) {
-    setSelected(d);
-    if (mapRef.current) { mapRef.current.panTo({ lat: d.lat, lng: d.lng }); mapRef.current.setZoom(16); }
-  }
 }
