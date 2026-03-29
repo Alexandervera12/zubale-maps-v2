@@ -553,7 +553,7 @@ export default function App() {
         ))}
         <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
           {SHEETS_URL&&<span onClick={fetchSheets} style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:loading?"#2c1006":"#0c1d35",color:loading?"#fdba74":"#93c5fd",fontWeight:500,cursor:"pointer"}}>{loading?"⟳ Cargando...":lastSync?`⟳ ${lastSync}`:"⟳ Live"}</span>}
-          {sheetMeta&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500}}>Actualización Sheet: {sheetMeta}</span>}
+          {(sheetMeta||lastSync)&&<span style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:"#0f2e1e",color:"#6ee7b7",fontWeight:500,whiteSpace:"nowrap"}}>Sheet: {sheetMeta||lastSync}</span>}
           <button onClick={()=>setDarkMap(d=>!d)} style={{background:inputBg,border:`1px solid ${inputBdr}`,borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:500,color:textMut}}>{dark?"☀ Claro":"☾ Oscuro"}</button>
         </div>
       </div>
@@ -720,6 +720,11 @@ export default function App() {
                 <option value="all">Todas las ventanas</option>
                 {VENTANAS.map(v=><option key={v} value={v}>{v}</option>)}
               </select>
+              {!drawingOrg&&(
+                <button onClick={()=>setDrawingOrg(true)} style={{width:"100%",padding:"9px",borderRadius:8,border:"none",cursor:"pointer",fontSize:13,fontWeight:500,color:"#fff",background:"#22c55e",marginBottom:8}}>
+                  + Dibujar zona
+                </button>
+              )}
               {drawingOrg&&(
                 <div>
                   <div style={{fontSize:12,color:"#f59e0b",marginBottom:8,padding:"8px",background:dark?"#1c1206":"#fffbeb",borderRadius:6,lineHeight:1.5}}>
@@ -831,7 +836,10 @@ export default function App() {
         <div style={{flex:1,position:"relative"}}>
           {!isLoaded?<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"#475569"}}>Cargando mapa...</div>:(
             <GoogleMap mapContainerStyle={{width:"100%",height:"100%"}} center={MAP_CENTER} zoom={11} onLoad={onLoad}
-              onClick={mode==="zonas"&&drawing?handleMapClick:mode==="orgZonas"&&drawingOrg?handleOrgMapClick:undefined}
+              onClick={(e)=>{
+                if(mode==="zonas"&&drawing) handleMapClick(e);
+                else if(mode==="orgZonas"&&drawingOrg) handleOrgMapClick(e);
+              }}
               options={{styles:dark?MAP_STYLE_DARK:MAP_STYLE_LIGHT,zoomControl:true}}>
 
               {zones.map(z=>{
@@ -912,22 +920,23 @@ export default function App() {
             const cLat=z.points.reduce((s,p)=>s+p.lat,0)/z.points.length;
             const cLng=z.points.reduce((s,p)=>s+p.lng,0)/z.points.length;
             const isAct=activeOrgZone===z.id;
-            const nameEncoded=encodeURIComponent(z.name);
-            const nameW=Math.max(60,z.name.length*8+24);
             return(
               <React.Fragment key={z.id}>
                 <Polygon
                   paths={z.points}
-                  options={{fillColor:z.color,fillOpacity:isAct?0.25:0.12,strokeColor:z.color,strokeOpacity:isAct?1:0.7,strokeWeight:isAct?3:2}}
+                  options={{fillColor:z.color,fillOpacity:isAct?0.28:0.14,strokeColor:z.color,strokeOpacity:isAct?1:0.75,strokeWeight:isAct?3:2}}
                   onClick={()=>setActiveOrgZone(isAct?null:z.id)}
                 />
                 <Marker
                   position={{lat:cLat,lng:cLng}}
                   onClick={()=>setActiveOrgZone(isAct?null:z.id)}
+                  title={z.name}
+                  label={{text:z.name,color:"#ffffff",fontWeight:"bold",fontSize:"12px"}}
                   icon={{
-                    url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${nameW}" height="26" viewBox="0 0 ${nameW} 26"><rect x="1" y="1" width="${nameW-2}" height="24" rx="5" fill="${z.color}" opacity="0.93"/><text x="${nameW/2}" y="17" text-anchor="middle" font-size="11" font-weight="600" fill="white" font-family="Arial,sans-serif">${z.name}</text></svg>`)}`,
-                    scaledSize:{width:nameW,height:26},
-                    anchor:{x:nameW/2,y:13},
+                    url:`data:image/svg+xml;base64,${btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="7" fill="${z.color}" stroke="white" stroke-width="2"/></svg>`)}`,
+                    scaledSize:{width:16,height:16},
+                    anchor:{x:8,y:8},
+                    labelOrigin:{x:8,y:-8},
                   }}
                 />
               </React.Fragment>
@@ -937,10 +946,12 @@ export default function App() {
           {drawingOrg&&orgPoints.length>=2&&<Polyline path={orgPoints} options={{strokeColor:"#22c55e",strokeOpacity:0.9,strokeWeight:2.5}}/>}
           {drawingOrg&&orgPoints.map((p,i)=>(
             <Marker key={i} position={p}
+              label={{text:String(i+1),color:"white",fontWeight:"bold",fontSize:"11px"}}
               icon={{
-                url:`data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#22c55e" stroke="white" stroke-width="2"/><text x="12" y="17" text-anchor="middle" font-size="12" font-weight="700" fill="white" font-family="Arial,sans-serif">${i+1}</text></svg>`)}`,
+                url:`data:image/svg+xml;base64,${btoa('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="11" fill="#22c55e" stroke="white" stroke-width="2"/></svg>')}`,
                 scaledSize:{width:24,height:24},
                 anchor:{x:12,y:12},
+                labelOrigin:{x:12,y:12},
               }}
             />
           ))}
